@@ -1,8 +1,14 @@
-name: Windows Build
+name: Windows Build and Release
 
 on:
   push:
+    branches:
+      - main
+    tags:
+      - "v*"
   pull_request:
+    branches:
+      - main
   workflow_dispatch:
 
 permissions:
@@ -48,3 +54,39 @@ jobs:
           name: flt-attendance-windows-x64
           path: out/make/**
           if-no-files-found: error
+          retention-days: 14
+
+  release:
+    name: Publish GitHub Release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout release metadata
+        uses: actions/checkout@v6
+
+      - name: Verify tag matches package version
+        shell: bash
+        run: |
+          PACKAGE_VERSION=$(node -p "require('./package.json').version")
+          if [ "${GITHUB_REF_NAME}" != "v${PACKAGE_VERSION}" ]; then
+            echo "Tag ${GITHUB_REF_NAME} does not match package version v${PACKAGE_VERSION}."
+            exit 1
+          fi
+
+      - name: Download Windows artifacts
+        uses: actions/download-artifact@v8
+        with:
+          name: flt-attendance-windows-x64
+          path: release-assets
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release-assets/**/*
+          generate_release_notes: true
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          fail_on_unmatched_files: true
