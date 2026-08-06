@@ -1,0 +1,10 @@
+*.xlsx binary
+*.docx binary
+*.node binary
+
+*.rs text eol=lf
+*.ts text eol=lf
+*.tsx text eol=lf
+*.mjs text eol=lf
+*.yml text eol=lf
+*.md text eol=lf

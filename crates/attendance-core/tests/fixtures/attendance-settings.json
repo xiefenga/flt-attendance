@@ -1,0 +1,12 @@
+{
+  "specialPersonnel": {
+    "punchMealNoOvertime": [
+      { "employeeNo": "22017", "name": "袁亚鸿" }
+    ],
+    "noPunchMealNoOvertime": [],
+    "noMealNoOvertime": []
+  },
+  "excludedPersonnel": [
+    { "employeeNo": "25181", "name": "李文祥" }
+  ]
+}

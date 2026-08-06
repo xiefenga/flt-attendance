@@ -1,0 +1,13 @@
+/target/
+/node_modules/
+/outputs/
+/dist/
+/out/
+/resources/native/
+*.node
+.DS_Store
+/tmp/
+*.tsbuildinfo
+*.log
+.idea/
+.vscode/

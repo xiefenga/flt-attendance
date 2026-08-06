@@ -1,0 +1,1172 @@
+use std::collections::{BTreeMap, HashMap, HashSet};
+
+use serde::Serialize;
+
+use crate::config::AttendanceConfig;
+use crate::holiday;
+use crate::model::{AttendanceDataset, DailyRecord, PunchKind};
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct AttendanceReport {
+    pub detail_rows: Vec<DetailRow>,
+    pub summary_rows: Vec<SummaryRow>,
+    pub exception_rows: Vec<ExceptionRow>,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct DetailRow {
+    pub employee_no: String,
+    pub name: String,
+    pub company: String,
+    pub days: Vec<DailyAttendance>,
+    pub summary: SummaryRow,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct DailyAttendance {
+    pub attendance: String,
+    pub overtime_hours: f64,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct SummaryRow {
+    pub employee_no: String,
+    pub name: String,
+    pub attendance_meal_count: f64,
+    pub overtime_meal_count: f64,
+    pub meal_allowance_count: Option<f64>,
+    pub travel_days: f64,
+    pub weekday_overtime_hours: f64,
+    pub weekend_overtime_hours: f64,
+    pub holiday_overtime_hours: f64,
+    pub expected_attendance_hours: f64,
+    pub actual_attendance_hours: Option<f64>,
+    pub annual_leave_hours: f64,
+    pub annual_leave_balance_hours: Option<f64>,
+    pub sick_leave_hours: f64,
+    pub personal_leave_hours: f64,
+    pub breastfeeding_leave_hours: f64,
+    pub marriage_leave_hours: f64,
+    pub maternity_leave_hours: f64,
+    pub bereavement_leave_hours: f64,
+    pub childcare_leave_hours: f64,
+    pub absent_hours: f64,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct ExceptionRow {
+    pub employee_no: String,
+    pub name: String,
+    pub missing_all: u32,
+    pub missing_in: u32,
+    pub missing_out: u32,
+    pub late_or_early_under_10: u32,
+    pub late_or_early_11_to_30: u32,
+    pub late_or_early_31_to_120_minutes: u32,
+    pub out_of_range: u32,
+    pub score: f64,
+    pub notes: Vec<String>,
+}
+
+pub fn calculate_attendance(dataset: &AttendanceDataset) -> AttendanceReport {
+    calculate_attendance_with_config(dataset, &AttendanceConfig::default())
+}
+
+pub fn calculate_attendance_with_config(
+    dataset: &AttendanceDataset,
+    config: &AttendanceConfig,
+) -> AttendanceReport {
+    let mut daily_by_employee: HashMap<&str, Vec<&DailyRecord>> = HashMap::new();
+    for daily in &dataset.daily {
+        daily_by_employee
+            .entry(&daily.employee_key)
+            .or_default()
+            .push(daily);
+    }
+
+    let mut invalid_by_employee: HashMap<&str, Vec<&crate::model::InvalidPunch>> = HashMap::new();
+    for invalid in &dataset.invalid_punches {
+        invalid_by_employee
+            .entry(&invalid.employee_key)
+            .or_default()
+            .push(invalid);
+    }
+
+    let mut detail_rows = Vec::with_capacity(dataset.monthly.len());
+    let mut summary_rows = Vec::with_capacity(dataset.monthly.len());
+    let mut exception_rows = Vec::new();
+    let mut unclassified_late_events = 0_u32;
+
+    for monthly in dataset
+        .monthly
+        .iter()
+        .filter(|row| !config.excludes_employee(&row.employee_no, &row.name))
+    {
+        let excludes_overtime = config
+            .special_personnel
+            .excludes_overtime(&monthly.employee_no, &monthly.name);
+        let uses_flexible_arrival_shift = config
+            .special_personnel
+            .uses_flexible_arrival_shift(&monthly.employee_no, &monthly.name);
+        let daily_records = daily_by_employee
+            .get(monthly.employee_key.as_str())
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
+        let invalid_punches = invalid_by_employee
+            .get(monthly.employee_key.as_str())
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
+
+        let expected_days = daily_records
+            .iter()
+            .filter(|daily| is_scheduled_shift(&daily.shift))
+            .count() as f64;
+        let travel_days = monthly
+            .daily_results
+            .iter()
+            .filter(|result| result.contains("出差"))
+            .count() as f64;
+        let childcare_leave_hours = unique_process_amount(&monthly.daily_results, "育儿假");
+        let prenatal_leave_hours = unique_process_amount(&monthly.daily_results, "产检假");
+        let absent_days: f64 = daily_records.iter().map(|daily| daily.absent_days).sum();
+        let marriage_leave_hours = monthly.marriage_leave_days * 8.0;
+        let maternity_leave_hours =
+            (monthly.maternity_leave_days + monthly.paternity_leave_days) * 8.0;
+        let bereavement_leave_hours = monthly.bereavement_leave_days * 8.0;
+        let menstrual_leave_hours = monthly.menstrual_leave_days * 8.0;
+        let absent_hours = absent_days * 8.0;
+        let leave_hours = monthly.personal_leave_hours
+            + monthly.compensatory_leave_hours
+            + monthly.sick_leave_hours
+            + monthly.annual_leave_hours
+            + monthly.breastfeeding_leave_hours
+            + marriage_leave_hours
+            + maternity_leave_hours
+            + bereavement_leave_hours
+            + menstrual_leave_hours
+            + childcare_leave_hours
+            + prenatal_leave_hours;
+        let expected_attendance_hours = expected_days * 8.0;
+        let normal_attendance_hours =
+            (expected_attendance_hours - leave_hours - absent_hours).max(0.0);
+        let weekday_overtime_hours = if excludes_overtime {
+            0.0
+        } else {
+            monthly.weekday_overtime_hours
+        };
+        let weekend_overtime_hours = if excludes_overtime {
+            0.0
+        } else {
+            monthly.weekend_overtime_hours
+        };
+        let holiday_overtime_hours = if excludes_overtime {
+            0.0
+        } else {
+            monthly.holiday_overtime_hours
+        };
+        let overtime_hours =
+            weekday_overtime_hours + weekend_overtime_hours + holiday_overtime_hours;
+
+        let meal_policy = meal_policy(config, &monthly.employee_no, &monthly.name);
+        let (attendance_meal_count, overtime_meal_count) = calculate_meal_allowance(
+            monthly,
+            daily_records,
+            dataset.period.year,
+            dataset.period.month,
+            meal_policy,
+            uses_flexible_arrival_shift,
+        );
+        let summary = SummaryRow {
+            employee_no: monthly.employee_no.clone(),
+            name: monthly.name.clone(),
+            // TODO(meal-allowance): add a hire-date source before implementing
+            // the new-hire first-day exception. This deferred exception must
+            // not block the other confirmed meal-allowance rules.
+            attendance_meal_count,
+            overtime_meal_count,
+            meal_allowance_count: Some(attendance_meal_count + overtime_meal_count),
+            travel_days,
+            weekday_overtime_hours,
+            weekend_overtime_hours,
+            holiday_overtime_hours,
+            expected_attendance_hours,
+            actual_attendance_hours: Some(normal_attendance_hours + overtime_hours),
+            annual_leave_hours: monthly.annual_leave_hours,
+            annual_leave_balance_hours: None,
+            sick_leave_hours: monthly.sick_leave_hours,
+            personal_leave_hours: monthly.personal_leave_hours,
+            breastfeeding_leave_hours: monthly.breastfeeding_leave_hours,
+            marriage_leave_hours,
+            maternity_leave_hours,
+            bereavement_leave_hours,
+            childcare_leave_hours,
+            absent_hours,
+        };
+        let mut days = build_daily_attendance(
+            monthly,
+            daily_records,
+            dataset.period.year,
+            dataset.period.month,
+            uses_flexible_arrival_shift,
+        );
+        if excludes_overtime {
+            for day in &mut days {
+                day.overtime_hours = 0.0;
+            }
+        }
+        detail_rows.push(DetailRow {
+            employee_no: monthly.employee_no.clone(),
+            name: monthly.name.clone(),
+            company: company_from_attendance_group(&monthly.attendance_group),
+            days,
+            summary: summary.clone(),
+        });
+        summary_rows.push(summary);
+
+        let (exception, unclassified) = calculate_exceptions(
+            &monthly.employee_no,
+            &monthly.name,
+            daily_records,
+            invalid_punches,
+            &monthly.daily_results,
+            uses_flexible_arrival_shift,
+        );
+        unclassified_late_events += unclassified;
+        if let Some(exception) = exception {
+            exception_rows.push(exception);
+        }
+    }
+
+    let mut warnings = vec![
+        "餐补已按确认口径计算；新员工入职当天例外因缺少入职日期数据暂未应用。".to_owned(),
+        "年假剩余未计算：钉钉报表不含期初余额。".to_owned(),
+        "本应出勤：非休息且有班次的日期按 8 小时计。".to_owned(),
+        "出差天数：按月度汇总中的出差日期计。".to_owned(),
+        "不在范围内打卡：按原始记录中的“当前不在可打卡的时间范围”计。".to_owned(),
+    ];
+    if unclassified_late_events > 0 {
+        warnings.push(format!(
+            "有 {unclassified_late_events} 条迟到/早退记录无法从班次和打卡时间计算分钟数，未计入绩效分档。"
+        ));
+    }
+    if !holiday::has_calendar(dataset.period.year) {
+        warnings.push(format!(
+            "未内置 {} 年法定节假日数据：暂按普通工作日和周末判断。",
+            dataset.period.year
+        ));
+    }
+    let matched_special_people = config.special_personnel.matched_count(
+        dataset
+            .monthly
+            .iter()
+            .filter(|row| !config.excludes_employee(&row.employee_no, &row.name))
+            .map(|row| (row.employee_no.as_str(), row.name.as_str())),
+    );
+    if matched_special_people > 0 {
+        warnings.push(format!(
+            "已按特殊人员配置排除 {matched_special_people} 人的加班时长。"
+        ));
+    }
+    let flexible_arrival_people = config.special_personnel.flexible_arrival_matched_count(
+        dataset
+            .monthly
+            .iter()
+            .filter(|row| !config.excludes_employee(&row.employee_no, &row.name))
+            .map(|row| (row.employee_no.as_str(), row.name.as_str())),
+    );
+    if flexible_arrival_people > 0 {
+        warnings.push(format!(
+            "已对 {flexible_arrival_people} 人应用 08:30 到岗分界的弹性下班规则。"
+        ));
+    }
+    let excluded_people = config.excluded_count(
+        dataset
+            .monthly
+            .iter()
+            .map(|row| (row.employee_no.as_str(), row.name.as_str())),
+    );
+    if excluded_people > 0 {
+        warnings.push(format!("已按不参与考勤配置忽略 {excluded_people} 人。"));
+    }
+
+    AttendanceReport {
+        detail_rows,
+        summary_rows,
+        exception_rows,
+        warnings,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MealPolicy {
+    Regular,
+    PunchOnly,
+    ScheduledWithoutPunch,
+    None,
+}
+
+fn meal_policy(config: &AttendanceConfig, employee_no: &str, name: &str) -> MealPolicy {
+    if config.special_personnel.excludes_meal(employee_no, name) {
+        MealPolicy::None
+    } else if config
+        .special_personnel
+        .uses_scheduled_meal_without_punch(employee_no, name)
+    {
+        MealPolicy::ScheduledWithoutPunch
+    } else if config
+        .special_personnel
+        .uses_punch_only_meal(employee_no, name)
+    {
+        MealPolicy::PunchOnly
+    } else {
+        MealPolicy::Regular
+    }
+}
+
+fn calculate_meal_allowance(
+    monthly: &crate::model::MonthlyRecord,
+    daily_records: &[&DailyRecord],
+    year: u16,
+    month: u8,
+    policy: MealPolicy,
+    uses_flexible_arrival_shift: bool,
+) -> (f64, f64) {
+    if policy == MealPolicy::None {
+        return (0.0, 0.0);
+    }
+    if policy == MealPolicy::ScheduledWithoutPunch {
+        let workdays = (1..=days_in_month(year, month))
+            .filter(|day| holiday::is_workday(year, month, *day as u8))
+            .count();
+        return (workdays as f64, 0.0);
+    }
+
+    let mut attendance_meals = 0_u32;
+    let mut overtime_meals = 0_u32;
+    for daily in daily_records {
+        let Some(day) = day_from_date(&daily.date) else {
+            continue;
+        };
+        if day == 0 || day > days_in_month(year, month) {
+            continue;
+        }
+        let result = monthly
+            .daily_results
+            .get(day - 1)
+            .map(String::as_str)
+            .unwrap_or("");
+        let is_workday = holiday::is_workday(year, month, day as u8);
+
+        let punches = punch_range(daily);
+        if is_workday {
+            if workday_attendance_meal(result, punches) {
+                attendance_meals += 1;
+            }
+            overtime_meals += workday_overtime_meals(
+                daily,
+                punches,
+                policy == MealPolicy::PunchOnly,
+                uses_flexible_arrival_shift,
+            );
+        } else {
+            overtime_meals += off_day_overtime_meals(
+                punches,
+                daily.overtime_hours,
+                policy == MealPolicy::PunchOnly,
+            );
+        }
+    }
+    (attendance_meals as f64, overtime_meals as f64)
+}
+
+fn workday_attendance_meal(result: &str, punches: Option<(u32, u32)>) -> bool {
+    !result.contains("出差")
+        && !result.contains("居家办公")
+        && punches.is_some_and(|(first_in, _)| first_in <= 10 * 60)
+}
+
+fn punch_range(daily: &DailyRecord) -> Option<(u32, u32)> {
+    let first_in = daily
+        .punch_slots
+        .iter()
+        .filter(|slot| slot.kind == PunchKind::In)
+        .filter_map(|slot| parse_punch_minutes(&slot.time))
+        .min()?;
+    let last_out = daily
+        .punch_slots
+        .iter()
+        .filter(|slot| slot.kind == PunchKind::Out)
+        .filter_map(|slot| parse_punch_minutes(&slot.time))
+        .max()?;
+    (last_out >= first_in).then_some((first_in, last_out))
+}
+
+fn expected_workday_end(daily: &DailyRecord, uses_flexible_arrival_shift: bool) -> Option<u32> {
+    if uses_flexible_arrival_shift {
+        let arrival = punch_range(daily)?.0;
+        return Some(if arrival <= 8 * 60 + 30 {
+            17 * 60 + 30
+        } else {
+            18 * 60
+        });
+    }
+    let times = extract_clock_minutes(&daily.shift);
+    let start = times.first().copied()?;
+    let end = times.get(1).copied()?;
+    Some(if end < start { end + 24 * 60 } else { end })
+}
+
+fn workday_overtime_meals(
+    daily: &DailyRecord,
+    punches: Option<(u32, u32)>,
+    punch_only: bool,
+    uses_flexible_arrival_shift: bool,
+) -> u32 {
+    let Some((_, last_out)) = punches else {
+        return 0;
+    };
+    let effective_end = if punch_only {
+        last_out
+    } else {
+        if daily.overtime_hours <= 0.0 {
+            return 0;
+        }
+        let Some(expected_end) = expected_workday_end(daily, uses_flexible_arrival_shift) else {
+            return 0;
+        };
+        let actual_minutes = last_out.saturating_sub(expected_end);
+        let approved_minutes = (daily.overtime_hours * 60.0).round().max(0.0) as u32;
+        expected_end + actual_minutes.min(approved_minutes)
+    };
+    u32::from(effective_end >= 19 * 60 + 30) + u32::from(effective_end >= 24 * 60)
+}
+
+fn off_day_overtime_meals(
+    punches: Option<(u32, u32)>,
+    approved_hours: f64,
+    punch_only: bool,
+) -> u32 {
+    let Some((first_in, last_out)) = punches else {
+        return 0;
+    };
+    if !punch_only && approved_hours <= 0.0 {
+        return 0;
+    }
+
+    let segments = [
+        (0, 12 * 60),
+        (13 * 60, 19 * 60 + 30),
+        (19 * 60 + 30, 24 * 60),
+    ];
+    let mut remaining = if punch_only {
+        u32::MAX
+    } else {
+        (approved_hours * 60.0).round().max(0.0) as u32
+    };
+    let mut meals = 0;
+    for (start, end) in segments {
+        let actual = last_out.min(end).saturating_sub(first_in.max(start));
+        let effective = actual.min(remaining);
+        if effective >= 2 * 60 {
+            meals += 1;
+        }
+        remaining = remaining.saturating_sub(effective);
+    }
+    meals
+}
+
+pub fn apply_company_history(
+    report: &mut AttendanceReport,
+    companies: &HashMap<String, String>,
+) -> usize {
+    let mut applied = 0;
+    for row in &mut report.detail_rows {
+        if let Some(company) = companies.get(&row.name) {
+            row.company.clone_from(company);
+            applied += 1;
+        }
+    }
+    applied
+}
+
+fn company_from_attendance_group(group: &str) -> String {
+    if group.contains("滁州") {
+        "滁州".to_owned()
+    } else if group.contains("昆山") {
+        "KSFAE".to_owned()
+    } else {
+        "JSFAE".to_owned()
+    }
+}
+
+fn build_daily_attendance(
+    monthly: &crate::model::MonthlyRecord,
+    daily_records: &[&DailyRecord],
+    year: u16,
+    month: u8,
+    uses_flexible_arrival_shift: bool,
+) -> Vec<DailyAttendance> {
+    let day_count = days_in_month(year, month);
+    let mut daily_by_day = HashMap::new();
+    for daily in daily_records {
+        if let Some(day) = day_from_date(&daily.date) {
+            daily_by_day.insert(day, *daily);
+        }
+    }
+
+    let mut cells = Vec::with_capacity(day_count);
+    let mut leave_processes: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+    for day_index in 0..day_count {
+        let result = monthly
+            .daily_results
+            .get(day_index)
+            .map(String::as_str)
+            .unwrap_or("");
+        let daily = daily_by_day.get(&(day_index + 1)).copied();
+        let mut attendance = if result.contains("休息") || result.contains("未排班") {
+            "☆".to_owned()
+        } else if result.is_empty() && daily.is_none_or(|row| !is_scheduled_shift(&row.shift)) {
+            String::new()
+        } else {
+            "√".to_owned()
+        };
+        let mut overtime_hours = daily.map(|row| row.overtime_hours).unwrap_or(0.0);
+
+        for part in result
+            .split(',')
+            .map(str::trim)
+            .filter(|part| !part.is_empty())
+        {
+            if part.starts_with("加班") {
+                if daily.is_none() {
+                    overtime_hours += extract_amount_before(part, "小时").unwrap_or(0.0);
+                }
+            } else if part.starts_with("出差") {
+                attendance = "C".to_owned();
+            } else if leave_symbol(part).is_some() {
+                leave_processes
+                    .entry(part.to_owned())
+                    .or_default()
+                    .push(day_index);
+            }
+        }
+
+        if result.contains("旷工") {
+            let hours = daily.map(|row| row.absent_days * 8.0).unwrap_or(8.0);
+            attendance = format!("X{}", format_hours(hours));
+        } else if let Some(daily) = daily {
+            let irregular = daily_irregular_mark(daily, result, uses_flexible_arrival_shift);
+            if !irregular.is_empty() {
+                attendance.push_str(&irregular);
+            }
+        }
+        cells.push(DailyAttendance {
+            attendance,
+            overtime_hours,
+        });
+    }
+
+    for (process, indexes) in leave_processes {
+        let Some(symbol) = leave_symbol(&process) else {
+            continue;
+        };
+        let amounts = allocate_process_hours(&process, indexes.len());
+        for (index, amount) in indexes.into_iter().zip(amounts) {
+            let prefix = if cells[index].attendance == "C" {
+                "C"
+            } else {
+                ""
+            };
+            cells[index].attendance = format!("{prefix}{symbol}{}", format_hours(amount));
+        }
+    }
+
+    cells
+}
+
+fn leave_symbol(process: &str) -> Option<&'static str> {
+    [
+        ("陪产假", "M"),
+        ("产假", "M"),
+        ("年假", "N"),
+        ("病假", "△"),
+        ("事假", "O"),
+        ("婚假", "H"),
+        ("丧假", "S"),
+        ("育儿假", "Y"),
+        ("哺乳假", "B"),
+        ("产检假", "P"),
+        ("调休", "T"),
+    ]
+    .into_iter()
+    .find_map(|(name, symbol)| process.starts_with(name).then_some(symbol))
+}
+
+fn allocate_process_hours(process: &str, occurrence_count: usize) -> Vec<f64> {
+    if occurrence_count == 0 {
+        return Vec::new();
+    }
+    if extract_amount_before(process, "天").is_some() {
+        return vec![8.0; occurrence_count];
+    }
+    let total = extract_amount_before(process, "小时").unwrap_or(0.0);
+    let mut remaining = total;
+    let mut result = vec![0.0; occurrence_count];
+    for amount in result.iter_mut().rev() {
+        *amount = remaining.min(8.0);
+        remaining = (remaining - *amount).max(0.0);
+    }
+    result
+}
+
+fn flexible_arrival_irregular_minutes(daily: &DailyRecord, attendance_result: &str) -> Option<u32> {
+    const ARRIVAL_BOUNDARY: u32 = 8 * 60 + 30;
+    const EARLY_ARRIVAL_END: u32 = 17 * 60 + 30;
+    const LATE_ARRIVAL_END: u32 = 18 * 60;
+
+    if !is_scheduled_shift(&daily.shift)
+        || attendance_result.contains("休息")
+        || attendance_result.contains("未排班")
+        || attendance_result.contains("出差")
+        || attendance_result
+            .split(',')
+            .map(str::trim)
+            .any(|part| leave_symbol(part).is_some())
+    {
+        return None;
+    }
+
+    let arrival = daily
+        .punch_slots
+        .iter()
+        .filter(|slot| slot.kind == PunchKind::In)
+        .filter_map(|slot| parse_punch_minutes(&slot.time))
+        .min()?;
+    let departure = daily
+        .punch_slots
+        .iter()
+        .filter(|slot| slot.kind == PunchKind::Out)
+        .filter_map(|slot| parse_punch_minutes(&slot.time))
+        .max()?;
+    let expected_end = if arrival <= ARRIVAL_BOUNDARY {
+        EARLY_ARRIVAL_END
+    } else {
+        LATE_ARRIVAL_END
+    };
+    let early_minutes = expected_end.saturating_sub(departure);
+    (early_minutes > 0).then_some(early_minutes)
+}
+
+fn daily_irregular_mark(
+    daily: &DailyRecord,
+    attendance_result: &str,
+    uses_flexible_arrival_shift: bool,
+) -> String {
+    if uses_flexible_arrival_shift {
+        let mut marks = flexible_arrival_irregular_minutes(daily, attendance_result)
+            .map(|minutes| format!("Z{minutes}"))
+            .into_iter()
+            .collect::<Vec<_>>();
+        if daily.missing_in_count > 0.0 || daily.missing_out_count > 0.0 {
+            marks.push("缺卡".to_owned());
+        }
+        return marks.join("");
+    }
+
+    let expected_times = extract_clock_minutes(&daily.shift);
+    let expected_start = expected_times.first().copied();
+    let expected_end = expected_times.get(1).copied().map(|end| {
+        if Some(end) < expected_start {
+            end + 24 * 60
+        } else {
+            end
+        }
+    });
+    let mut marks = Vec::new();
+    for slot in &daily.punch_slots {
+        let value = match (slot.kind, slot.result.as_str()) {
+            (PunchKind::In, "迟到") => expected_start.and_then(|expected| {
+                parse_punch_minutes(&slot.time).map(|actual| ("D", actual.saturating_sub(expected)))
+            }),
+            (PunchKind::Out, "早退") => expected_end.and_then(|expected| {
+                parse_punch_minutes(&slot.time).map(|actual| ("Z", expected.saturating_sub(actual)))
+            }),
+            _ => None,
+        };
+        if let Some((symbol, minutes)) = value.filter(|(_, minutes)| *minutes > 0) {
+            marks.push(format!("{symbol}{minutes}"));
+        }
+    }
+    if daily.missing_in_count > 0.0 || daily.missing_out_count > 0.0 {
+        marks.push("缺卡".to_owned());
+    }
+    marks.join("")
+}
+
+fn day_from_date(text: &str) -> Option<usize> {
+    text.split_whitespace()
+        .next()?
+        .split('-')
+        .nth(2)?
+        .parse()
+        .ok()
+}
+
+pub(crate) fn days_in_month(year: u16, month: u8) -> usize {
+    match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if year % 400 == 0 || (year % 4 == 0 && year % 100 != 0) => 29,
+        2 => 28,
+        _ => 0,
+    }
+}
+
+fn format_hours(value: f64) -> String {
+    if (value - value.round()).abs() < 0.000_001 {
+        format!("{value:.0}")
+    } else {
+        format!("{value:.1}")
+    }
+}
+
+fn calculate_exceptions(
+    employee_no: &str,
+    name: &str,
+    daily_records: &[&DailyRecord],
+    invalid_punches: &[&crate::model::InvalidPunch],
+    daily_results: &[String],
+    uses_flexible_arrival_shift: bool,
+) -> (Option<ExceptionRow>, u32) {
+    let mut row = ExceptionRow {
+        employee_no: employee_no.to_owned(),
+        name: name.to_owned(),
+        missing_all: 0,
+        missing_in: 0,
+        missing_out: 0,
+        late_or_early_under_10: 0,
+        late_or_early_11_to_30: 0,
+        late_or_early_31_to_120_minutes: 0,
+        out_of_range: invalid_punches.len() as u32,
+        score: 0.0,
+        notes: Vec::new(),
+    };
+    let mut unclassified = 0;
+
+    for daily in daily_records {
+        let date = display_date(&daily.date);
+        let missing_in = daily.missing_in_count.round().max(0.0) as u32;
+        let missing_out = daily.missing_out_count.round().max(0.0) as u32;
+        if missing_in > 0 && missing_out > 0 {
+            let both = missing_in.min(missing_out);
+            row.missing_all += both;
+            row.missing_in += missing_in - both;
+            row.missing_out += missing_out - both;
+            row.notes.push(format!("{date}未打卡"));
+        } else {
+            if missing_in > 0 {
+                row.missing_in += missing_in;
+                row.notes.push(format!("{date}上班未签到"));
+            }
+            if missing_out > 0 {
+                row.missing_out += missing_out;
+                row.notes.push(format!("{date}下班未签退"));
+            }
+        }
+
+        if daily.absent_days > 0.0
+            && daily.punch_slots.is_empty()
+            && is_scheduled_shift(&daily.shift)
+            && missing_in == 0
+            && missing_out == 0
+        {
+            row.missing_all += daily.absent_days.round().max(0.0) as u32;
+            row.notes.push(format!("{date}旷工且无打卡"));
+        }
+
+        if uses_flexible_arrival_shift {
+            let attendance_result = day_from_date(&daily.date)
+                .and_then(|day| daily_results.get(day.saturating_sub(1)))
+                .map(String::as_str)
+                .unwrap_or("");
+            if let Some(minutes) = flexible_arrival_irregular_minutes(daily, attendance_result) {
+                classify_minutes(&mut row, minutes, &date, PunchKind::Out);
+            }
+            continue;
+        }
+
+        let expected_times = extract_clock_minutes(&daily.shift);
+        let expected_start = expected_times.first().copied();
+        let expected_end = expected_times.get(1).copied().map(|end| {
+            if Some(end) < expected_start {
+                end + 24 * 60
+            } else {
+                end
+            }
+        });
+
+        for slot in &daily.punch_slots {
+            let minutes = match (slot.kind, slot.result.as_str()) {
+                (PunchKind::In, "迟到") => expected_start.and_then(|expected| {
+                    parse_punch_minutes(&slot.time).map(|actual| actual.saturating_sub(expected))
+                }),
+                (PunchKind::Out, "早退") => expected_end.and_then(|expected| {
+                    parse_punch_minutes(&slot.time).map(|actual| expected.saturating_sub(actual))
+                }),
+                _ => continue,
+            };
+
+            if let Some(minutes) = minutes.filter(|value| *value > 0) {
+                classify_minutes(&mut row, minutes, &date, slot.kind);
+            } else {
+                unclassified += 1;
+            }
+        }
+    }
+
+    for invalid in invalid_punches {
+        row.notes.push(format!(
+            "{}不在范围内打卡",
+            display_date(&invalid.attendance_date)
+        ));
+    }
+
+    row.score = (row.missing_all
+        + row.missing_in
+        + row.missing_out
+        + row.late_or_early_under_10
+        + row.out_of_range) as f64
+        + row.late_or_early_11_to_30 as f64 * 2.0
+        + (row.late_or_early_31_to_120_minutes as f64 / 30.0).ceil();
+
+    let has_exception = row.score > 0.0 || row.late_or_early_31_to_120_minutes > 0;
+    (has_exception.then_some(row), unclassified)
+}
+
+fn classify_minutes(row: &mut ExceptionRow, minutes: u32, date: &str, kind: PunchKind) {
+    let label = match kind {
+        PunchKind::In => "迟到",
+        PunchKind::Out => "早退",
+    };
+    match minutes {
+        1..=10 => row.late_or_early_under_10 += 1,
+        11..=30 => row.late_or_early_11_to_30 += 1,
+        31..=120 => row.late_or_early_31_to_120_minutes += minutes,
+        _ => return,
+    }
+    row.notes.push(format!("{date}{label}{minutes}分钟"));
+}
+
+fn is_scheduled_shift(shift: &str) -> bool {
+    !shift.is_empty() && shift != "休息"
+}
+
+fn unique_process_amount(daily_results: &[String], process_name: &str) -> f64 {
+    let mut unique = HashSet::new();
+    for result in daily_results {
+        for part in result.split(',').map(str::trim) {
+            if part.starts_with(process_name) {
+                unique.insert(part.to_owned());
+            }
+        }
+    }
+
+    unique
+        .iter()
+        .map(|process| {
+            extract_amount_before(process, "天")
+                .map(|days| days * 8.0)
+                .or_else(|| extract_amount_before(process, "小时"))
+                .unwrap_or(0.0)
+        })
+        .sum()
+}
+
+fn extract_amount_before(text: &str, unit: &str) -> Option<f64> {
+    let unit_index = text.rfind(unit)?;
+    let before = &text[..unit_index];
+    let start = before
+        .char_indices()
+        .rev()
+        .take_while(|(_, ch)| ch.is_ascii_digit() || *ch == '.')
+        .last()
+        .map(|(index, _)| index)?;
+    before[start..].parse().ok()
+}
+
+fn extract_clock_minutes(text: &str) -> Vec<u32> {
+    let bytes = text.as_bytes();
+    let mut result = Vec::new();
+    let mut index = 0;
+    while index + 4 < bytes.len() {
+        if bytes[index].is_ascii_digit()
+            && bytes[index + 1].is_ascii_digit()
+            && bytes[index + 2] == b':'
+            && bytes[index + 3].is_ascii_digit()
+            && bytes[index + 4].is_ascii_digit()
+        {
+            let hour = ((bytes[index] - b'0') as u32) * 10 + (bytes[index + 1] - b'0') as u32;
+            let minute = ((bytes[index + 3] - b'0') as u32) * 10 + (bytes[index + 4] - b'0') as u32;
+            if hour < 24 && minute < 60 {
+                result.push(hour * 60 + minute);
+            }
+            index += 5;
+        } else {
+            index += 1;
+        }
+    }
+    result
+}
+
+fn parse_punch_minutes(text: &str) -> Option<u32> {
+    let mut minutes = extract_clock_minutes(text).into_iter().next()?;
+    if text.contains("次日") {
+        minutes += 24 * 60;
+    }
+    Some(minutes)
+}
+
+fn display_date(text: &str) -> String {
+    let date = text.split_whitespace().next().unwrap_or(text);
+    let mut parts = date.split('-');
+    let _year = parts.next();
+    let month = parts.next().and_then(|value| value.parse::<u32>().ok());
+    let day = parts.next().and_then(|value| value.parse::<u32>().ok());
+    match (month, day) {
+        (Some(month), Some(day)) => format!("{month}.{day}"),
+        _ => date.to_owned(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn flexible_daily(arrival: &str, departure: &str) -> DailyRecord {
+        DailyRecord {
+            employee_key: "26333".to_owned(),
+            employee_no: "26333".to_owned(),
+            name: "张一成".to_owned(),
+            date: "26-07-01 星期三".to_owned(),
+            shift: "默认班次 08:30-17:30".to_owned(),
+            overtime_hours: 0.0,
+            punch_slots: vec![
+                crate::model::PunchSlot {
+                    kind: PunchKind::In,
+                    time: arrival.to_owned(),
+                    result: "迟到".to_owned(),
+                },
+                crate::model::PunchSlot {
+                    kind: PunchKind::Out,
+                    time: departure.to_owned(),
+                    result: "正常".to_owned(),
+                },
+            ],
+            late_count: 1.0,
+            severe_late_count: 0.0,
+            absent_late_days: 0.0,
+            early_count: 0.0,
+            missing_in_count: 0.0,
+            missing_out_count: 0.0,
+            absent_days: 0.0,
+        }
+    }
+
+    fn meal_daily(arrival: &str, departure: &str, approved_hours: f64) -> DailyRecord {
+        let mut daily = flexible_daily(arrival, departure);
+        daily.employee_key = "10001".to_owned();
+        daily.employee_no = "10001".to_owned();
+        daily.name = "测试员工".to_owned();
+        daily.overtime_hours = approved_hours;
+        daily.punch_slots[0].result = "正常".to_owned();
+        daily
+    }
+
+    #[test]
+    fn parses_shift_and_next_day_times() {
+        assert_eq!(
+            extract_clock_minutes("默认班次 08:30-17:30"),
+            vec![510, 1050]
+        );
+        assert_eq!(parse_punch_minutes("次日 00:04"), Some(1444));
+    }
+
+    #[test]
+    fn parses_leave_days_and_hours() {
+        assert_eq!(
+            extract_amount_before("育儿假07-01到07-02 2天", "天"),
+            Some(2.0)
+        );
+        assert_eq!(
+            extract_amount_before("育儿假07-01 3.5小时", "小时"),
+            Some(3.5)
+        );
+    }
+
+    #[test]
+    fn formats_dingtalk_date() {
+        assert_eq!(display_date("26-07-01 星期三"), "7.1");
+    }
+
+    #[test]
+    fn flexible_arrival_shift_uses_0830_boundary_without_late_mark() {
+        let boundary = flexible_daily("08:30", "17:30");
+        assert_eq!(daily_irregular_mark(&boundary, "", true), "");
+        assert!(
+            calculate_exceptions("26333", "张一成", &[&boundary], &[], &[], true)
+                .0
+                .is_none()
+        );
+
+        let after_boundary = flexible_daily("08:31", "18:00");
+        assert_eq!(daily_irregular_mark(&after_boundary, "", true), "");
+        assert!(
+            calculate_exceptions("26333", "张一成", &[&after_boundary], &[], &[], true)
+                .0
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn flexible_arrival_shift_uses_1800_for_early_departure() {
+        let daily = flexible_daily("08:31", "17:45");
+        assert_eq!(daily_irregular_mark(&daily, "", true), "Z15");
+
+        let exception = calculate_exceptions("26333", "张一成", &[&daily], &[], &[], true)
+            .0
+            .expect("17:45 下班应按 18:00 计算早退");
+        assert_eq!(exception.late_or_early_11_to_30, 1);
+        assert_eq!(exception.late_or_early_under_10, 0);
+        assert_eq!(exception.score, 2.0);
+        assert_eq!(exception.notes, vec!["7.1早退15分钟"]);
+        assert_eq!(daily_irregular_mark(&daily, "年假07-01 8小时", true), "");
+        let leave_results = vec!["年假07-01 8小时".to_owned()];
+        assert!(
+            calculate_exceptions("26333", "张一成", &[&daily], &[], &leave_results, true,)
+                .0
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn attendance_meal_includes_1000_and_excludes_travel_and_home_office() {
+        let at_boundary = meal_daily("10:00", "17:30", 0.0);
+        assert!(workday_attendance_meal("", punch_range(&at_boundary)));
+
+        let after_boundary = meal_daily("10:01", "17:30", 0.0);
+        assert!(!workday_attendance_meal("", punch_range(&after_boundary)));
+        assert!(!workday_attendance_meal(
+            "出差1天",
+            punch_range(&at_boundary)
+        ));
+        assert!(!workday_attendance_meal(
+            "居家办公",
+            punch_range(&at_boundary)
+        ));
+    }
+
+    #[test]
+    fn regular_workday_meal_requires_approval_and_uses_shorter_duration() {
+        let no_approval = meal_daily("08:30", "19:30", 0.0);
+        assert_eq!(
+            workday_overtime_meals(&no_approval, punch_range(&no_approval), false, false),
+            0
+        );
+
+        let insufficient_approval = meal_daily("08:30", "24:00", 1.5);
+        assert_eq!(
+            workday_overtime_meals(
+                &insufficient_approval,
+                punch_range(&insufficient_approval),
+                false,
+                false
+            ),
+            0
+        );
+
+        let one_meal = meal_daily("08:30", "19:30", 2.0);
+        assert_eq!(
+            workday_overtime_meals(&one_meal, punch_range(&one_meal), false, false),
+            1
+        );
+
+        let two_meals = meal_daily("08:30", "次日 00:00", 6.5);
+        assert_eq!(
+            workday_overtime_meals(&two_meals, punch_range(&two_meals), false, false),
+            2
+        );
+    }
+
+    #[test]
+    fn punch_only_workday_meal_ignores_approval() {
+        let daily = meal_daily("08:30", "次日 00:00", 0.0);
+        assert_eq!(
+            workday_overtime_meals(&daily, punch_range(&daily), true, false),
+            2
+        );
+    }
+
+    #[test]
+    fn off_day_segments_each_require_two_hours_and_exclude_lunch() {
+        assert_eq!(
+            off_day_overtime_meals(Some((10 * 60, 21 * 60 + 30)), 20.0, false),
+            3
+        );
+        assert_eq!(
+            off_day_overtime_meals(Some((10 * 60 + 1, 21 * 60 + 29)), 20.0, false),
+            1
+        );
+        assert_eq!(
+            off_day_overtime_meals(Some((11 * 60, 14 * 60)), 20.0, false),
+            0
+        );
+    }
+
+    #[test]
+    fn off_day_approval_caps_effective_time_chronologically() {
+        let punches = Some((10 * 60, 21 * 60 + 30));
+        assert_eq!(off_day_overtime_meals(punches, 0.0, false), 0);
+        assert_eq!(off_day_overtime_meals(punches, 2.0, false), 1);
+        assert_eq!(off_day_overtime_meals(punches, 0.0, true), 3);
+    }
+
+    #[test]
+    fn no_punch_meal_policy_counts_calendar_workdays_without_daily_records() {
+        let monthly = crate::model::MonthlyRecord {
+            employee_key: "25182".to_owned(),
+            employee_no: "25182".to_owned(),
+            name: "欧智元".to_owned(),
+            user_id: String::new(),
+            attendance_group: String::new(),
+            department: String::new(),
+            position: String::new(),
+            attendance_days: 0.0,
+            weekday_overtime_hours: 0.0,
+            weekend_overtime_hours: 0.0,
+            holiday_overtime_hours: 0.0,
+            personal_leave_hours: 0.0,
+            compensatory_leave_hours: 0.0,
+            sick_leave_hours: 0.0,
+            annual_leave_hours: 0.0,
+            maternity_leave_days: 0.0,
+            paternity_leave_days: 0.0,
+            marriage_leave_days: 0.0,
+            menstrual_leave_days: 0.0,
+            bereavement_leave_days: 0.0,
+            breastfeeding_leave_hours: 0.0,
+            daily_results: vec![],
+        };
+        assert_eq!(
+            calculate_meal_allowance(
+                &monthly,
+                &[],
+                2026,
+                7,
+                MealPolicy::ScheduledWithoutPunch,
+                false,
+            ),
+            (23.0, 0.0)
+        );
+    }
+}
