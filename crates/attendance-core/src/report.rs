@@ -51,10 +51,9 @@ const SUMMARY_HEADERS: [&str; 20] = [
     "旷工（小时）",
 ];
 
-const EXCEPTION_HEADERS: [&str; 11] = [
+const EXCEPTION_HEADERS: [&str; 10] = [
     "序号",
     "姓名",
-    "未打卡（次）",
     "未签到（次）",
     "未签退（次）",
     "迟到/早退10分钟以内（次）",
@@ -156,13 +155,13 @@ pub fn generate_attendance_report(
         let sheet = workbook.add_worksheet().set_name("异常打卡明细")?;
         sheet.set_row_height(0, 28)?;
         sheet.set_row_height(1, 42)?;
-        sheet.merge_range(0, 0, 0, 10, &format!("{month}月份打卡异常明细表"), &title)?;
+        sheet.merge_range(0, 0, 0, 9, &format!("{month}月份打卡异常明细表"), &title)?;
         for (column, value) in EXCEPTION_HEADERS.iter().enumerate() {
             sheet.write_string_with_format(1, column as u16, *value, &header)?;
             let width = match column {
                 0 => 6.0,
                 1 => 11.0,
-                10 => 42.0,
+                9 => 42.0,
                 _ => 15.0,
             };
             sheet.set_column_width(column as u16, width)?;
@@ -288,11 +287,13 @@ fn write_detail_sheet(
 
         for day_index in 0..day_count {
             let column = 5 + day_index as u16;
-            let day_format = if is_off_day(year, month, (day_index + 1) as u8) {
-                &weekend_body
+            let day = (day_index + 1) as u8;
+            let off_day = if row.works_saturdays {
+                !holiday::is_six_day_workday(year, month, day)
             } else {
-                &body
+                is_off_day(year, month, day)
             };
+            let day_format = if off_day { &weekend_body } else { &body };
             if let Some(day) = row.days.get(day_index) {
                 if day.attendance.is_empty() {
                     sheet.write_blank(attendance_row, column, day_format)?;
@@ -536,12 +537,11 @@ fn write_exception_row(
     sheet.write_number_with_format(excel_row, 0, serial as f64, number)?;
     sheet.write_string_with_format(excel_row, 1, &row.name, text)?;
     for (column, value) in [
-        row.missing_all,
         row.missing_in,
         row.missing_out,
         row.late_or_early_under_10,
         row.late_or_early_11_to_30,
-        row.late_or_early_31_to_120_minutes,
+        row.late_or_early_30_to_120_minutes,
         row.out_of_range,
     ]
     .iter()
@@ -551,17 +551,17 @@ fn write_exception_row(
     }
     let worksheet_row = excel_row + 1;
     let formula = Formula::new(format!(
-        "=(C{worksheet_row}+D{worksheet_row}+E{worksheet_row}+F{worksheet_row})*1+G{worksheet_row}*2+(CEILING(H{worksheet_row},30)/30)+I{worksheet_row}*1"
+        "=(C{worksheet_row}+D{worksheet_row}+E{worksheet_row})*1+F{worksheet_row}*2+(CEILING(G{worksheet_row},30)/30)+H{worksheet_row}*1"
     ))
     .set_result(row.score.to_string());
-    sheet.write_formula_with_format(excel_row, 9, formula, number)?;
+    sheet.write_formula_with_format(excel_row, 8, formula, number)?;
     let notes = row.notes.join("、");
     if notes.chars().count() > 80 {
         sheet.set_row_height(excel_row, 45)?;
     } else if notes.chars().count() > 40 {
         sheet.set_row_height(excel_row, 30)?;
     }
-    sheet.write_string_with_format(excel_row, 10, notes, note)?;
+    sheet.write_string_with_format(excel_row, 9, notes, note)?;
     Ok(())
 }
 
@@ -606,6 +606,6 @@ mod tests {
     #[test]
     fn headers_have_expected_width() {
         assert_eq!(SUMMARY_HEADERS.len(), 20);
-        assert_eq!(EXCEPTION_HEADERS.len(), 11);
+        assert_eq!(EXCEPTION_HEADERS.len(), 10);
     }
 }

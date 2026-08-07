@@ -55,6 +55,12 @@ const DEFAULT_SETTINGS: AttendanceSettings = {
     ],
     flexibleArrivalShift: [
       { employeeNo: "26333", name: "张一成" }
+    ],
+    sixDayNoMeal: [
+      { employeeNo: "", name: "廖传兰" }
+    ],
+    sixDayFourHourNoMeal: [
+      { employeeNo: "", name: "廖传霞" }
     ]
   },
   excludedPersonnel: []
@@ -64,7 +70,9 @@ const SPECIAL_GROUPS = [
   "punchMealNoOvertime",
   "noPunchMealNoOvertime",
   "noMealNoOvertime",
-  "flexibleArrivalShift"
+  "flexibleArrivalShift",
+  "sixDayNoMeal",
+  "sixDayFourHourNoMeal"
 ] as const;
 
 const require = createRequire(__filename);
@@ -113,7 +121,9 @@ function normalizeSpecialPersonnel(value: unknown): SpecialPersonnelConfig {
   const namesWithoutNumber = new Set<string>();
   for (const group of SPECIAL_GROUPS) {
     const rawPeople = record[group] ??
-      (group === "flexibleArrivalShift" ? DEFAULT_SETTINGS.specialPersonnel[group] : undefined);
+      (["flexibleArrivalShift", "sixDayNoMeal", "sixDayFourHourNoMeal"].includes(group)
+        ? DEFAULT_SETTINGS.specialPersonnel[group]
+        : undefined);
     if (!Array.isArray(rawPeople)) throw new Error("特殊人员配置缺少分组");
     config[group] = rawPeople.map(normalizePerson);
     for (const person of config[group]) {

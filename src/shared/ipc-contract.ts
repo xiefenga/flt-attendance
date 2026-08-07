@@ -21,7 +21,9 @@ export type SpecialPersonnelGroup =
   | "punchMealNoOvertime"
   | "noPunchMealNoOvertime"
   | "noMealNoOvertime"
-  | "flexibleArrivalShift";
+  | "flexibleArrivalShift"
+  | "sixDayNoMeal"
+  | "sixDayFourHourNoMeal";
 
 export interface SpecialPerson {
   employeeNo: string;
@@ -33,6 +35,8 @@ export interface SpecialPersonnelConfig {
   noPunchMealNoOvertime: SpecialPerson[];
   noMealNoOvertime: SpecialPerson[];
   flexibleArrivalShift: SpecialPerson[];
+  sixDayNoMeal: SpecialPerson[];
+  sixDayFourHourNoMeal: SpecialPerson[];
 }
 
 export interface AttendanceSettings {

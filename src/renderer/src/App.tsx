@@ -62,6 +62,14 @@ const SPECIAL_GROUPS: Array<{
   {
     key: "flexibleArrivalShift",
     title: "弹性到岗（8:30 分界）"
+  },
+  {
+    key: "sixDayNoMeal",
+    title: "六天制（每日8小时、无餐补无加班）"
+  },
+  {
+    key: "sixDayFourHourNoMeal",
+    title: "六天制（每日4小时、无餐补无加班）"
   }
 ];
 
@@ -70,7 +78,9 @@ function cloneSpecialPersonnel(config: SpecialPersonnelConfig): SpecialPersonnel
     punchMealNoOvertime: config.punchMealNoOvertime.map((person) => ({ ...person })),
     noPunchMealNoOvertime: config.noPunchMealNoOvertime.map((person) => ({ ...person })),
     noMealNoOvertime: config.noMealNoOvertime.map((person) => ({ ...person })),
-    flexibleArrivalShift: config.flexibleArrivalShift.map((person) => ({ ...person }))
+    flexibleArrivalShift: config.flexibleArrivalShift.map((person) => ({ ...person })),
+    sixDayNoMeal: config.sixDayNoMeal.map((person) => ({ ...person })),
+    sixDayFourHourNoMeal: config.sixDayFourHourNoMeal.map((person) => ({ ...person }))
   };
 }
 

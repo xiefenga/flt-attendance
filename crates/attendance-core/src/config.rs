@@ -20,6 +20,10 @@ pub struct SpecialPersonnelConfig {
     pub no_meal_no_overtime: Vec<SpecialPerson>,
     #[serde(default)]
     pub flexible_arrival_shift: Vec<SpecialPerson>,
+    #[serde(default)]
+    pub six_day_no_meal: Vec<SpecialPerson>,
+    #[serde(default)]
+    pub six_day_four_hour_no_meal: Vec<SpecialPerson>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -46,7 +50,31 @@ impl SpecialPersonnelConfig {
     pub fn excludes_meal(&self, employee_no: &str, name: &str) -> bool {
         self.no_meal_no_overtime
             .iter()
+            .chain(&self.six_day_no_meal)
+            .chain(&self.six_day_four_hour_no_meal)
             .any(|person| person.matches(employee_no, name))
+    }
+
+    pub fn six_day_daily_hours(&self, employee_no: &str, name: &str) -> Option<f64> {
+        if self
+            .six_day_four_hour_no_meal
+            .iter()
+            .any(|person| person.matches(employee_no, name))
+        {
+            Some(4.0)
+        } else if self
+            .six_day_no_meal
+            .iter()
+            .any(|person| person.matches(employee_no, name))
+        {
+            Some(8.0)
+        } else {
+            None
+        }
+    }
+
+    pub fn uses_six_day_schedule(&self, employee_no: &str, name: &str) -> bool {
+        self.six_day_daily_hours(employee_no, name).is_some()
     }
 
     pub fn excludes_overtime(&self, employee_no: &str, name: &str) -> bool {
@@ -75,11 +103,22 @@ impl SpecialPersonnelConfig {
             .count()
     }
 
+    pub fn six_day_matched_count<'a>(
+        &self,
+        employees: impl Iterator<Item = (&'a str, &'a str)>,
+    ) -> usize {
+        employees
+            .filter(|(employee_no, name)| self.uses_six_day_schedule(employee_no, name))
+            .count()
+    }
+
     fn all_people(&self) -> impl Iterator<Item = &SpecialPerson> {
         self.punch_meal_no_overtime
             .iter()
             .chain(&self.no_punch_meal_no_overtime)
             .chain(&self.no_meal_no_overtime)
+            .chain(&self.six_day_no_meal)
+            .chain(&self.six_day_four_hour_no_meal)
     }
 }
 
@@ -148,6 +187,27 @@ mod tests {
         };
         assert!(config.uses_flexible_arrival_shift("26333", "张一成"));
         assert!(!config.excludes_overtime("26333", "张一成"));
+    }
+
+    #[test]
+    fn six_day_schedules_exclude_meals_and_all_overtime() {
+        let config = SpecialPersonnelConfig {
+            six_day_no_meal: vec![SpecialPerson {
+                employee_no: String::new(),
+                name: "廖传兰".to_owned(),
+            }],
+            six_day_four_hour_no_meal: vec![SpecialPerson {
+                employee_no: String::new(),
+                name: "廖传霞".to_owned(),
+            }],
+            ..Default::default()
+        };
+        assert_eq!(config.six_day_daily_hours("", "廖传兰"), Some(8.0));
+        assert_eq!(config.six_day_daily_hours("", "廖传霞"), Some(4.0));
+        assert!(config.excludes_meal("", "廖传兰"));
+        assert!(config.excludes_meal("", "廖传霞"));
+        assert!(config.excludes_overtime("", "廖传兰"));
+        assert!(config.excludes_overtime("", "廖传霞"));
     }
 
     #[test]

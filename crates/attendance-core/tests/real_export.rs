@@ -35,6 +35,23 @@ fn parses_and_reconciles_real_dingtalk_export() {
     assert_eq!(dataset.monthly.len(), 236);
     assert_eq!(dataset.daily.len(), 7_316);
     assert_eq!(dataset.invalid_punches.len(), 16);
+    assert_eq!(dataset.employment_records.len(), 44);
+    assert_eq!(
+        dataset
+            .employment_records
+            .iter()
+            .filter(|record| record.hire_date.is_some())
+            .count(),
+        39
+    );
+    assert_eq!(
+        dataset
+            .employment_records
+            .iter()
+            .filter(|record| record.termination_date.is_some())
+            .count(),
+        5
+    );
 
     let source_weekday_overtime: f64 = dataset
         .monthly
@@ -141,8 +158,23 @@ fn parses_and_reconciles_real_dingtalk_export() {
         .iter()
         .find(|row| row.name == "陈文杰")
         .expect("应包含陈文杰异常");
-    assert_eq!(chen_wenjie.late_or_early_31_to_120_minutes, 120);
+    assert_eq!(chen_wenjie.late_or_early_30_to_120_minutes, 120);
     assert_eq!(chen_wenjie.score, 4.0);
+    let chen_wenjie_summary = report
+        .summary_rows
+        .iter()
+        .find(|row| row.employee_no == "26320")
+        .expect("应包含 7 月 20 日入职的陈文杰");
+    assert_eq!(chen_wenjie_summary.expected_attendance_hours, 80.0);
+    assert_eq!(chen_wenjie_summary.attendance_meal_count, 10.0);
+
+    let zhang_yicheng = report
+        .summary_rows
+        .iter()
+        .find(|row| row.employee_no == "26333")
+        .expect("应包含 7 月 31 日入职的张一成");
+    assert_eq!(zhang_yicheng.expected_attendance_hours, 8.0);
+    assert_eq!(zhang_yicheng.attendance_meal_count, 1.0);
 
     let configured = calculate_attendance_with_config(
         &dataset,
@@ -174,6 +206,63 @@ fn parses_and_reconciles_real_dingtalk_export() {
             .iter()
             .all(|day| day.overtime_hours == 0.0)
     );
+
+    let six_day_configured = calculate_attendance_with_config(
+        &dataset,
+        &AttendanceConfig {
+            special_personnel: SpecialPersonnelConfig {
+                six_day_no_meal: vec![SpecialPerson {
+                    employee_no: String::new(),
+                    name: "廖传兰".to_owned(),
+                }],
+                six_day_four_hour_no_meal: vec![SpecialPerson {
+                    employee_no: String::new(),
+                    name: "廖传霞".to_owned(),
+                }],
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+    );
+    let liao_chuanlan = six_day_configured
+        .detail_rows
+        .iter()
+        .find(|row| row.name == "廖传兰")
+        .expect("六天制配置应匹配廖传兰");
+    assert!(liao_chuanlan.works_saturdays);
+    assert_eq!(liao_chuanlan.summary.expected_attendance_hours, 216.0);
+    assert_eq!(liao_chuanlan.summary.meal_allowance_count, Some(0.0));
+    assert_eq!(liao_chuanlan.summary.weekday_overtime_hours, 0.0);
+    assert_eq!(liao_chuanlan.summary.weekend_overtime_hours, 0.0);
+    assert_eq!(liao_chuanlan.summary.holiday_overtime_hours, 0.0);
+    assert!(
+        liao_chuanlan
+            .days
+            .iter()
+            .all(|day| day.overtime_hours == 0.0)
+    );
+
+    let liao_chuanxia = six_day_configured
+        .detail_rows
+        .iter()
+        .find(|row| row.name == "廖传霞")
+        .expect("四小时六天制配置应匹配廖传霞");
+    assert!(liao_chuanxia.works_saturdays);
+    assert_eq!(liao_chuanxia.summary.expected_attendance_hours, 108.0);
+    assert_eq!(liao_chuanxia.summary.actual_attendance_hours, Some(108.0));
+    assert_eq!(liao_chuanxia.summary.meal_allowance_count, Some(0.0));
+    assert_eq!(liao_chuanxia.summary.weekday_overtime_hours, 0.0);
+    assert_eq!(liao_chuanxia.summary.weekend_overtime_hours, 0.0);
+    assert_eq!(liao_chuanxia.summary.holiday_overtime_hours, 0.0);
+    assert!(
+        liao_chuanxia
+            .days
+            .iter()
+            .all(|day| day.overtime_hours == 0.0)
+    );
+    assert!(six_day_configured.warnings.iter().any(|warning| {
+        warning.contains("2 人") && warning.contains("周一至周六工作制")
+    }));
 
     let excluded = calculate_attendance_with_config(
         &dataset,

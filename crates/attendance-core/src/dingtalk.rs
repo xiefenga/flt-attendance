@@ -6,11 +6,12 @@ use serde::Serialize;
 use thiserror::Error;
 
 use crate::model::{
-    AttendanceDataset, AttendancePeriod, DailyRecord, InvalidPunch, MonthlyRecord, PunchKind,
-    PunchSlot,
+    AttendanceDataset, AttendancePeriod, CalendarDate, DailyRecord, EmploymentRecord, InvalidPunch,
+    MonthlyRecord, PunchKind, PunchSlot,
 };
 
 const REQUIRED_SHEETS: [&str; 4] = ["打卡时间", "原始记录", "月度汇总", "每日统计"];
+const EMPLOYMENT_SHEETS: [&str; 2] = ["入职名单", "离职名单"];
 
 #[derive(Debug, Error)]
 pub enum DingtalkError {
@@ -24,6 +25,12 @@ pub enum DingtalkError {
     MissingPeriod,
     #[error("每日统计表包含多个考勤月份：{0}")]
     MixedPeriod(String),
+    #[error("工作表 {sheet} 第 {row} 行的{field}无效")]
+    InvalidEmploymentDate {
+        sheet: String,
+        row: usize,
+        field: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -64,10 +71,18 @@ pub fn inspect_dingtalk(path: impl AsRef<Path>) -> Result<WorkbookSummary, Dingt
         }
     }
 
-    let mut sheets = Vec::with_capacity(REQUIRED_SHEETS.len());
+    let inspected_sheets = REQUIRED_SHEETS
+        .into_iter()
+        .chain(
+            EMPLOYMENT_SHEETS
+                .into_iter()
+                .filter(|name| available.contains(*name)),
+        )
+        .collect::<Vec<_>>();
+    let mut sheets = Vec::with_capacity(inspected_sheets.len());
     let mut employee_list = Vec::new();
     let mut period = None;
-    for sheet_name in REQUIRED_SHEETS {
+    for sheet_name in inspected_sheets {
         let range = workbook.worksheet_range(sheet_name)?;
         validate_headers(sheet_name, &range)?;
         if sheet_name == "每日统计" {
@@ -86,11 +101,10 @@ pub fn inspect_dingtalk(path: impl AsRef<Path>) -> Result<WorkbookSummary, Dingt
                 .collect();
         }
 
-        let header_rows = if matches!(sheet_name, "打卡时间" | "月度汇总" | "每日统计")
-        {
-            4
-        } else {
-            3
+        let header_rows = match sheet_name {
+            "入职名单" | "离职名单" => 1,
+            "打卡时间" | "月度汇总" | "每日统计" => 4,
+            _ => 3,
         };
         let mut employees = HashSet::new();
         let mut data_rows = 0;
@@ -137,13 +151,70 @@ pub fn load_dingtalk(path: impl AsRef<Path>) -> Result<AttendanceDataset, Dingta
     let raw_range = workbook.worksheet_range("原始记录")?;
     validate_headers("原始记录", &raw_range)?;
     let invalid_punches = parse_invalid_punches(&raw_range);
+    let employment_records = parse_employment_records(&mut workbook)?;
 
     Ok(AttendanceDataset {
         period,
         monthly,
         daily,
         invalid_punches,
+        employment_records,
     })
+}
+
+fn parse_employment_records<RS>(
+    workbook: &mut calamine::Sheets<RS>,
+) -> Result<Vec<EmploymentRecord>, DingtalkError>
+where
+    RS: std::io::Read + std::io::Seek,
+{
+    let available: HashSet<String> = workbook.sheet_names().iter().cloned().collect();
+    let mut records = std::collections::BTreeMap::<String, EmploymentRecord>::new();
+
+    for (sheet_name, is_hire) in [("入职名单", true), ("离职名单", false)] {
+        if !available.contains(sheet_name) {
+            continue;
+        }
+        let range = workbook.worksheet_range(sheet_name)?;
+        validate_headers(sheet_name, &range)?;
+        for (index, row) in range.rows().skip(1).enumerate() {
+            let name = cell_text(row.first());
+            if name.is_empty() {
+                continue;
+            }
+            let employee_no = cell_text(row.get(2));
+            let date =
+                cell_date(row.get(3)).ok_or_else(|| DingtalkError::InvalidEmploymentDate {
+                    sheet: sheet_name.to_owned(),
+                    row: index + 2,
+                    field: if is_hire {
+                        "入职日期"
+                    } else {
+                        "离职日期"
+                    }
+                    .to_owned(),
+                })?;
+            let key = if employee_no.is_empty() {
+                format!("name:{name}")
+            } else {
+                format!("employee:{employee_no}")
+            };
+            let record = records.entry(key).or_insert_with(|| EmploymentRecord {
+                employee_no: employee_no.clone(),
+                name: name.clone(),
+                company: cell_text(row.get(1)),
+                hire_date: None,
+                termination_date: None,
+            });
+            if is_hire {
+                record.hire_date = Some(date);
+            } else {
+                record.termination_date = Some(date);
+            }
+        }
+    }
+
+    Ok(records.into_values().collect())
 }
 
 pub fn load_company_history(
@@ -230,6 +301,60 @@ fn period_from_text(value: &str) -> Option<(u16, u8)> {
         raw_year
     };
     valid_period(year, parts[1].parse().ok()?)
+}
+
+fn cell_date(cell: Option<&Data>) -> Option<CalendarDate> {
+    match cell? {
+        Data::DateTime(value) if value.is_datetime() => {
+            let (year, month, day, ..) = value.to_ymd_hms_milli();
+            valid_date(year, month, day)
+        }
+        Data::Float(value) => date_from_excel_serial(*value),
+        Data::Int(value) => date_from_excel_serial(*value as f64),
+        Data::DateTimeIso(value) | Data::String(value) => date_from_text(value),
+        _ => None,
+    }
+}
+
+fn date_from_excel_serial(value: f64) -> Option<CalendarDate> {
+    if !(36_526.0..73_416.0).contains(&value) {
+        return None;
+    }
+    let datetime = ExcelDateTime::new(value, ExcelDateTimeType::DateTime, false);
+    let (year, month, day, ..) = datetime.to_ymd_hms_milli();
+    valid_date(year, month, day)
+}
+
+fn date_from_text(value: &str) -> Option<CalendarDate> {
+    let parts = value
+        .split(|character: char| !character.is_ascii_digit())
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>();
+    if parts.len() < 3 {
+        return None;
+    }
+    let raw_year: u16 = parts[0].parse().ok()?;
+    let year = match parts[0].len() {
+        2 => 2000 + raw_year,
+        4 => raw_year,
+        _ => return None,
+    };
+    valid_date(year, parts[1].parse().ok()?, parts[2].parse().ok()?)
+}
+
+fn valid_date(year: u16, month: u8, day: u8) -> Option<CalendarDate> {
+    let max_day = match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if year % 400 == 0 || (year % 4 == 0 && year % 100 != 0) => 29,
+        2 => 28,
+        _ => return None,
+    };
+    ((2000..=2100).contains(&year) && (1..=max_day).contains(&day)).then_some(CalendarDate {
+        year,
+        month,
+        day,
+    })
 }
 
 fn valid_period(year: u16, month: u8) -> Option<(u16, u8)> {
@@ -380,6 +505,8 @@ fn validate_headers(sheet_name: &str, range: &calamine::Range<Data>) -> Result<(
             "下班1打卡时间",
             "加班总时长",
         ][..],
+        "入职名单" => &["姓名", "工号", "入职日期"][..],
+        "离职名单" => &["姓名", "工号", "离职日期"][..],
         _ => &[][..],
     };
 
@@ -445,5 +572,26 @@ mod tests {
         assert_eq!(period_from_text("2026年07月01日"), Some((2026, 7)));
         assert_eq!(period_from_text("26-07-01 星期三"), Some((2026, 7)));
         assert_eq!(period_from_text("07-01-2026"), None);
+    }
+
+    #[test]
+    fn reads_employment_dates_from_serial_and_text() {
+        assert_eq!(
+            date_from_excel_serial(46_234.0),
+            Some(CalendarDate {
+                year: 2026,
+                month: 7,
+                day: 31,
+            })
+        );
+        assert_eq!(
+            date_from_text("2026/7/31"),
+            Some(CalendarDate {
+                year: 2026,
+                month: 7,
+                day: 31,
+            })
+        );
+        assert_eq!(date_from_text("2026/2/30"), None);
     }
 }

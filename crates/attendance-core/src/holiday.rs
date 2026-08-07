@@ -65,6 +65,23 @@ pub(crate) fn is_off_day(year: u16, month: u8, day: u8) -> bool {
     !is_workday(year, month, day)
 }
 
+pub(crate) fn is_saturday(year: u16, month: u8, day: u8) -> bool {
+    weekday_index(year, month, day) == 6
+}
+
+pub(crate) fn is_six_day_workday(year: u16, month: u8, day: u8) -> bool {
+    if is_workday(year, month, day) {
+        return true;
+    }
+    let date = format!("{year:04}-{month:02}-{day:02}");
+    is_saturday(year, month, day)
+        && !calendars()
+            .iter()
+            .find(|calendar| calendar.year == year)
+            .and_then(|calendar| calendar.days.iter().find(|item| item.date == date))
+            .is_some_and(|item| item.is_off_day)
+}
+
 fn weekday_index(year: u16, month: u8, day: u8) -> usize {
     let offsets = [0_i32, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4];
     let mut year = year as i32;
@@ -92,6 +109,9 @@ mod tests {
     fn calendar_keeps_normal_weekday_fallback() {
         assert!(is_workday(2026, 7, 1));
         assert!(!is_workday(2026, 7, 4));
+        assert!(is_six_day_workday(2026, 7, 4));
+        assert!(!is_six_day_workday(2026, 7, 5));
+        assert!(!is_six_day_workday(2026, 1, 3));
     }
 
     #[test]
