@@ -114,6 +114,7 @@ pub fn calculate_attendance_with_config(
             .special_personnel
             .six_day_daily_hours(&monthly.employee_no, &monthly.name);
         let uses_six_day_schedule = six_day_daily_hours.is_some();
+        let meal_policy = meal_policy(config, &monthly.employee_no, &monthly.name);
         let daily_records = daily_by_employee
             .get(monthly.employee_key.as_str())
             .map(Vec::as_slice)
@@ -157,6 +158,9 @@ pub fn calculate_attendance_with_config(
                         )
                 })
                 .count() as f64
+        } else if meal_policy == MealPolicy::ScheduledWithoutPunch {
+            calendar_workdays_in_employment(dataset.period.year, dataset.period.month, employment)
+                as f64
         } else {
             active_daily_records
                 .iter()
@@ -222,7 +226,6 @@ pub fn calculate_attendance_with_config(
         let overtime_hours =
             weekday_overtime_hours + weekend_overtime_hours + holiday_overtime_hours;
 
-        let meal_policy = meal_policy(config, &monthly.employee_no, &monthly.name);
         let (attendance_meal_count, overtime_meal_count) = calculate_meal_allowance(
             monthly,
             &active_daily_records,
@@ -299,7 +302,7 @@ pub fn calculate_attendance_with_config(
 
     let mut warnings = vec![
         "年假剩余未计算：钉钉报表不含期初余额。".to_owned(),
-        "本应出勤：一般人员按有效班次日 × 8 小时；六天制人员按周一至周六及配置的每日小时数计算。"
+        "本应出勤：一般人员按有效班次日 × 8 小时；不打卡人员按法定工作日 × 8 小时；六天制人员按周一至周六及配置的每日小时数计算。"
             .to_owned(),
         "出差天数：按月度汇总中的出差日期计。".to_owned(),
         "不在范围内打卡：按原始记录中的“当前不在可打卡的时间范围”计。".to_owned(),
@@ -428,12 +431,7 @@ fn calculate_meal_allowance(
         return (0.0, 0.0);
     }
     if policy == MealPolicy::ScheduledWithoutPunch {
-        let workdays = (1..=days_in_month(year, month))
-            .filter(|day| {
-                holiday::is_workday(year, month, *day as u8)
-                    && is_active_day(employment, year, month, *day)
-            })
-            .count();
+        let workdays = calendar_workdays_in_employment(year, month, employment);
         return (workdays as f64, 0.0);
     }
 
@@ -637,6 +635,19 @@ fn is_active_day(employment: Option<&EmploymentRecord>, year: u16, month: u8, da
                 .termination_date
                 .is_none_or(|termination_date| date <= termination_date)
     })
+}
+
+fn calendar_workdays_in_employment(
+    year: u16,
+    month: u8,
+    employment: Option<&EmploymentRecord>,
+) -> usize {
+    (1..=days_in_month(year, month))
+        .filter(|day| {
+            holiday::is_workday(year, month, *day as u8)
+                && is_active_day(employment, year, month, *day)
+        })
+        .count()
 }
 
 fn is_hire_day(employment: Option<&EmploymentRecord>, year: u16, month: u8, day: usize) -> bool {
@@ -1403,8 +1414,8 @@ mod tests {
     }
 
     #[test]
-    fn no_punch_meal_policy_counts_calendar_workdays_without_daily_records() {
-        let monthly = crate::model::MonthlyRecord {
+    fn no_punch_policy_counts_calendar_workdays_without_daily_records() {
+        let mut monthly = crate::model::MonthlyRecord {
             employee_key: "25182".to_owned(),
             employee_no: "25182".to_owned(),
             name: "欧智元".to_owned(),
@@ -1465,7 +1476,55 @@ mod tests {
             (1.0, 0.0),
             "入职当天即使没有有效打卡记录也应记出勤餐补"
         );
+        assert_eq!(
+            calculate_meal_allowance(
+                &monthly,
+                &[],
+                2026,
+                7,
+                MealPolicy::ScheduledWithoutPunch,
+                false,
+                Some(&employment),
+            ),
+            (10.0, 0.0),
+            "不打卡人员应按在职区间内的法定工作日记出勤餐补"
+        );
         assert!(!is_active_day(Some(&employment), 2026, 7, 19));
         assert!(is_active_day(Some(&employment), 2026, 7, 20));
+
+        monthly.personal_leave_hours = 8.0;
+        monthly.weekday_overtime_hours = 4.0;
+        monthly.weekend_overtime_hours = 6.0;
+        monthly.holiday_overtime_hours = 8.0;
+        let dataset = AttendanceDataset {
+            period: crate::model::AttendancePeriod {
+                year: 2026,
+                month: 7,
+            },
+            monthly: vec![monthly],
+            daily: vec![],
+            invalid_punches: vec![],
+            employment_records: vec![employment],
+        };
+        let report = calculate_attendance_with_config(
+            &dataset,
+            &AttendanceConfig {
+                special_personnel: crate::config::SpecialPersonnelConfig {
+                    no_punch_meal_no_overtime: vec![crate::config::SpecialPerson {
+                        employee_no: "25182".to_owned(),
+                        name: "欧智元".to_owned(),
+                    }],
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        );
+        let summary = &report.summary_rows[0];
+        assert_eq!(summary.expected_attendance_hours, 80.0);
+        assert_eq!(summary.actual_attendance_hours, Some(72.0));
+        assert_eq!(summary.attendance_meal_count, 10.0);
+        assert_eq!(summary.weekday_overtime_hours, 0.0);
+        assert_eq!(summary.weekend_overtime_hours, 0.0);
+        assert_eq!(summary.holiday_overtime_hours, 0.0);
     }
 }

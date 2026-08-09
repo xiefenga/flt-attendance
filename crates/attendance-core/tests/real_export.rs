@@ -180,6 +180,20 @@ fn parses_and_reconciles_real_dingtalk_export() {
         &dataset,
         &AttendanceConfig {
             special_personnel: SpecialPersonnelConfig {
+                no_punch_meal_no_overtime: vec![
+                    SpecialPerson {
+                        employee_no: "25196".to_owned(),
+                        name: "李阳".to_owned(),
+                    },
+                    SpecialPerson {
+                        employee_no: "25182".to_owned(),
+                        name: "欧智元".to_owned(),
+                    },
+                    SpecialPerson {
+                        employee_no: "24135".to_owned(),
+                        name: "张丽雯".to_owned(),
+                    },
+                ],
                 no_meal_no_overtime: vec![SpecialPerson {
                     employee_no: "25181".to_owned(),
                     name: "李文祥".to_owned(),
@@ -206,6 +220,25 @@ fn parses_and_reconciles_real_dingtalk_export() {
             .iter()
             .all(|day| day.overtime_hours == 0.0)
     );
+    for (employee_no, expected_actual, expected_absent) in [
+        ("25196", 136.0, 48.0),
+        ("25182", 184.0, 0.0),
+        ("24135", 184.0, 0.0),
+    ] {
+        let summary = configured
+            .summary_rows
+            .iter()
+            .find(|row| row.employee_no == employee_no)
+            .expect("应包含不打卡人员");
+        assert_eq!(summary.expected_attendance_hours, 184.0);
+        assert_eq!(summary.actual_attendance_hours, Some(expected_actual));
+        assert_eq!(summary.absent_hours, expected_absent);
+        assert_eq!(summary.attendance_meal_count, 23.0);
+        assert_eq!(summary.overtime_meal_count, 0.0);
+        assert_eq!(summary.weekday_overtime_hours, 0.0);
+        assert_eq!(summary.weekend_overtime_hours, 0.0);
+        assert_eq!(summary.holiday_overtime_hours, 0.0);
+    }
 
     let six_day_configured = calculate_attendance_with_config(
         &dataset,

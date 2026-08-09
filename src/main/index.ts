@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { createRequire } from "node:module";
-import { app, BrowserWindow, dialog, ipcMain, shell } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, nativeTheme, shell } from "electron";
 import squirrelStartup from "electron-squirrel-startup";
 
 import type {
@@ -199,9 +199,6 @@ async function writeSettings(value: unknown): Promise<AttendanceSettings> {
 }
 
 async function createWindow(): Promise<void> {
-  const isMac = process.platform === "darwin";
-  const isWindows = process.platform === "win32";
-
   mainWindow = new BrowserWindow({
     width: 1000,
     height: 760,
@@ -209,18 +206,10 @@ async function createWindow(): Promise<void> {
     minHeight: 640,
     show: false,
     title: "福拉特考勤统计",
-    backgroundColor: isMac || isWindows ? "#00000000" : "#eaebf0",
-    transparent: isMac,
-    ...(isMac
-      ? {
-          vibrancy: "sidebar" as const,
-          visualEffectState: "followWindow" as const
-        }
-      : {}),
-    ...(isWindows ? { backgroundMaterial: "acrylic" as const } : {}),
+    backgroundColor: "#eaebf0",
     titleBarStyle: "hidden",
     titleBarOverlay: {
-      color: isMac || isWindows ? "#00000000" : "#f4f4f7",
+      color: "#eaebf0",
       symbolColor: "#747889",
       height: 44
     },
@@ -370,6 +359,7 @@ function registerIpc(): void {
 if (squirrelStartup) app.quit();
 else {
   app.whenReady().then(async () => {
+    nativeTheme.themeSource = "light";
     registerIpc();
     await createWindow();
     app.on("activate", () => {
