@@ -69,6 +69,12 @@ function historyTemplatePath(): string {
     : path.resolve(__dirname, "../../examples/templates/考勤统计表模板.xlsx");
 }
 
+function appIconPath(): string {
+  return app.isPackaged
+    ? path.join(process.resourcesPath, "icons", "app-icon.png")
+    : path.resolve(__dirname, "../../resources/icons/app-icon.png");
+}
+
 function getNativeApi(): NativeApi {
   if (!nativeApi) nativeApi = require(nativeModulePath()) as NativeApi;
   return nativeApi;
@@ -181,6 +187,7 @@ async function createWindow(): Promise<void> {
     minHeight: 640,
     show: false,
     title: "福拉特考勤统计",
+    icon: appIconPath(),
     backgroundColor: "#eaebf0",
     titleBarStyle: "hidden",
     titleBarOverlay: {
@@ -334,6 +341,7 @@ if (squirrelStartup) app.quit();
 else {
   app.whenReady().then(async () => {
     nativeTheme.themeSource = "light";
+    if (process.platform === "darwin") app.dock?.setIcon(appIconPath());
     registerIpc();
     await createWindow();
     app.on("activate", () => {
