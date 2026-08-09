@@ -19,7 +19,6 @@ import {
   DialogDescription,
   DialogTitle
 } from "@/components/ui/dialog";
-import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import {
   Select,
@@ -134,10 +133,24 @@ export default function App() {
   const [settingsNotice, setSettingsNotice] = useState<string | null>(null);
   const [addGroup, setAddGroup] = useState<SpecialPersonnelGroup>("punchMealNoOvertime");
   const [currentEmployeeIndex, setCurrentEmployeeIndex] = useState<string | undefined>();
-  const [addEmployeeNo, setAddEmployeeNo] = useState("");
-  const [addName, setAddName] = useState("");
 
   const ready = file !== null && inspect !== null && busy === "idle";
+  const configuredPeople = settingsDraft
+    ? [
+        ...SPECIAL_GROUPS.flatMap((group) => settingsDraft.specialPersonnel[group.key]),
+        ...settingsDraft.excludedPersonnel
+      ]
+    : [];
+  const availableEmployees = (inspect?.employees ?? [])
+    .map((employee, index) => ({ employee, index: String(index) }))
+    .filter(({ employee }) => !configuredPeople.some((configured) =>
+      configured.employeeNo && employee.employeeNo
+        ? configured.employeeNo === employee.employeeNo
+        : configured.name === employee.name
+    ));
+  const selectedEmployee = currentEmployeeIndex === undefined
+    ? null
+    : inspect?.employees[Number(currentEmployeeIndex)] ?? null;
 
   async function selectFile() {
     if (busy !== "idle") return;
@@ -191,6 +204,7 @@ export default function App() {
       const loaded = await window.attendanceDesktop.getSettings();
       setSettingsDraft(cloneSettings(loaded));
       setSettingsPage("home");
+      setCurrentEmployeeIndex(undefined);
       setSettingsOpen(true);
     } catch (caught) {
       setError(readableError(caught));
@@ -199,28 +213,20 @@ export default function App() {
     }
   }
 
-  function selectCurrentEmployee(index: string) {
-    if (!index || !inspect) return;
-    const employee = inspect.employees[Number(index)];
-    if (!employee) return;
-    setAddEmployeeNo(employee.employeeNo);
-    setAddName(employee.name);
-  }
-
   function addConfiguredPerson() {
-    if (!settingsDraft || !addName.trim()) return;
+    if (!settingsDraft || !selectedEmployee) return;
     const person: SpecialPerson = {
-      employeeNo: addEmployeeNo.trim(),
-      name: addName.trim()
+      employeeNo: selectedEmployee.employeeNo.trim(),
+      name: selectedEmployee.name.trim()
     };
     const allPeople = [
       ...SPECIAL_GROUPS.flatMap((group) => settingsDraft.specialPersonnel[group.key]),
       ...settingsDraft.excludedPersonnel
     ];
     const duplicate = allPeople.some((existing) =>
-        person.employeeNo
-          ? existing.employeeNo === person.employeeNo
-          : !existing.employeeNo && existing.name === person.name
+      existing.employeeNo && person.employeeNo
+        ? existing.employeeNo === person.employeeNo
+        : existing.name === person.name
     );
     if (duplicate) {
       setSettingsError(person.employeeNo ? `工号 ${person.employeeNo} 已经配置` : `${person.name} 已经配置`);
@@ -236,8 +242,6 @@ export default function App() {
         [addGroup]: [...settingsDraft.specialPersonnel[addGroup], person]
       }
     });
-    setAddEmployeeNo("");
-    setAddName("");
     setCurrentEmployeeIndex(undefined);
     setSettingsError(null);
   }
@@ -299,13 +303,6 @@ export default function App() {
     } catch (caught) {
       setSettingsError(readableError(caught));
     }
-  }
-
-  async function restoreDefaultSettings() {
-    const defaults = await window.attendanceDesktop.getDefaultSettings();
-    setSettingsDraft(cloneSettings(defaults));
-    setSettingsError(null);
-    setSettingsNotice("已恢复预置名单，保存后生效");
   }
 
   const people = sheetValue(inspect, "月度汇总", "unique_employees");
@@ -413,17 +410,22 @@ export default function App() {
             {settingsPage === "home" ? <div className="settings-tools">
               <Button variant="ghost" type="button" onClick={() => void importSettings()}>导入</Button>
               <Button variant="ghost" type="button" onClick={() => void exportSettings()}>导出</Button>
-              <Button variant="ghost" type="button" onClick={() => void restoreDefaultSettings()}>恢复预置</Button>
             </div> : null}
           </div>
 
           {settingsPage === "home" ? <div className="settings-menu">
-            <Button variant="ghost" className="settings-menu-button" type="button" onClick={() => setSettingsPage("special")}>
+            <Button variant="ghost" className="settings-menu-button" type="button" onClick={() => {
+              setCurrentEmployeeIndex(undefined);
+              setSettingsPage("special");
+            }}>
               <strong>特殊人员</strong>
               <span className="settings-menu-count">{specialPersonnelCount(settingsDraft)}</span>
               <ChevronRight className="settings-menu-arrow" size={20} />
             </Button>
-            <Button variant="ghost" className="settings-menu-button" type="button" onClick={() => setSettingsPage("excluded")}>
+            <Button variant="ghost" className="settings-menu-button" type="button" onClick={() => {
+              setCurrentEmployeeIndex(undefined);
+              setSettingsPage("excluded");
+            }}>
               <strong>不参与考勤人员</strong>
               <span className="settings-menu-count">{settingsDraft?.excludedPersonnel.length ?? 0}</span>
               <ChevronRight className="settings-menu-arrow" size={20} />
@@ -465,26 +467,24 @@ export default function App() {
           </div> : null}
 
           {settingsPage !== "home" ? <div className="settings-add">
-            <strong>添加人员</strong>
+            <div className="settings-add-heading">
+              <strong>添加人员</strong>
+              <span>{inspect ? "人员信息来自当前考勤报表" : "请先在首页选择考勤报表"}</span>
+            </div>
             <div className={`settings-add-fields${settingsPage === "excluded" ? " is-excluded" : ""}`}>
               {settingsPage === "special" ? <Select value={addGroup} onValueChange={(value) => setAddGroup(value as SpecialPersonnelGroup)}>
-                <SelectTrigger aria-label="特殊人员分类"><SelectValue /></SelectTrigger>
+                <SelectTrigger aria-label="添加到特殊人员分组"><SelectValue /></SelectTrigger>
                 <SelectContent>{SPECIAL_GROUPS.map((group) => <SelectItem value={group.key} key={group.key}>{group.title}</SelectItem>)}</SelectContent>
               </Select> : null}
-              <Select value={currentEmployeeIndex} disabled={!inspect} onValueChange={(value) => {
-                setCurrentEmployeeIndex(value);
-                selectCurrentEmployee(value);
-              }}>
-                <SelectTrigger aria-label="从当前报表选择员工"><SelectValue placeholder={inspect ? "从当前报表选择" : "选择报表后可选员工"} /></SelectTrigger>
+              <Select value={currentEmployeeIndex} disabled={!inspect || availableEmployees.length === 0} onValueChange={setCurrentEmployeeIndex}>
+                <SelectTrigger aria-label="从当前报表选择员工"><SelectValue placeholder={!inspect ? "选择报表后可添加人员" : availableEmployees.length ? "选择人员" : "当前报表人员均已配置"} /></SelectTrigger>
                 <SelectContent>
-                {inspect?.employees.map((employee, index) => (
-                  <SelectItem value={String(index)} key={`${employee.employeeNo}:${employee.name}`}>{employee.name} · {employee.employeeNo || "无工号"}</SelectItem>
+                {availableEmployees.map(({ employee, index }) => (
+                  <SelectItem value={index} key={`${employee.employeeNo}:${employee.name}`}>{employee.name} · {employee.employeeNo || "无工号"}</SelectItem>
                 ))}
                 </SelectContent>
               </Select>
-              <Input value={addEmployeeNo} onChange={(event) => setAddEmployeeNo(event.target.value)} placeholder="工号" aria-label="工号" />
-              <Input value={addName} onChange={(event) => setAddName(event.target.value)} placeholder="姓名" aria-label="姓名" />
-              <Button type="button" disabled={!addName.trim()} onClick={addConfiguredPerson}>添加</Button>
+              <Button type="button" disabled={!selectedEmployee} onClick={addConfiguredPerson}>添加</Button>
             </div>
           </div> : null}
 

@@ -1,0 +1,35 @@
+{
+  "specialPersonnel": {
+    "punchMealNoOvertime": [
+      { "employeeNo": "22017", "name": "袁亚鸿" },
+      { "employeeNo": "22018", "name": "刘苏伟" },
+      { "employeeNo": "23035", "name": "郑立明" },
+      { "employeeNo": "23041", "name": "王善鹤" },
+      { "employeeNo": "23095", "name": "吴通" },
+      { "employeeNo": "26265", "name": "刘景超" },
+      { "employeeNo": "26266", "name": "李培丞" },
+      { "employeeNo": "", "name": "吴晶晶" }
+    ],
+    "noPunchMealNoOvertime": [
+      { "employeeNo": "25196", "name": "李阳" },
+      { "employeeNo": "25182", "name": "欧智元" },
+      { "employeeNo": "24135", "name": "张丽雯" }
+    ],
+    "noMealNoOvertime": [
+      { "employeeNo": "17003", "name": "李欣" },
+      { "employeeNo": "24151", "name": "李述华" },
+      { "employeeNo": "24168", "name": "晁伟" },
+      { "employeeNo": "26281", "name": "陈冬冬" }
+    ],
+    "flexibleArrivalShift": [
+      { "employeeNo": "26333", "name": "张一成" }
+    ],
+    "sixDayNoMeal": [
+      { "employeeNo": "", "name": "廖传兰" }
+    ],
+    "sixDayFourHourNoMeal": [
+      { "employeeNo": "", "name": "廖传霞" }
+    ]
+  },
+  "excludedPersonnel": []
+}

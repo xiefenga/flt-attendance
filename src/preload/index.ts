@@ -7,7 +7,6 @@ const attendanceDesktop: AttendanceDesktopApi = {
   selectOutput: (defaultName) => ipcRenderer.invoke("attendance:select-output", defaultName),
   inspect: (inputPath) => ipcRenderer.invoke("attendance:inspect", inputPath),
   getSettings: () => ipcRenderer.invoke("attendance:get-settings"),
-  getDefaultSettings: () => ipcRenderer.invoke("attendance:get-default-settings"),
   importSettings: () => ipcRenderer.invoke("attendance:import-settings"),
   exportSettings: (settings) => ipcRenderer.invoke("attendance:export-settings", settings),
   saveSettings: (settings) => ipcRenderer.invoke("attendance:save-settings", settings),

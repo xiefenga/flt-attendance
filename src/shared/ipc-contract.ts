@@ -66,7 +66,6 @@ export interface AttendanceDesktopApi {
   selectOutput(defaultName: string): Promise<string | null>;
   inspect(inputPath: string): Promise<InspectResponse>;
   getSettings(): Promise<AttendanceSettings>;
-  getDefaultSettings(): Promise<AttendanceSettings>;
   importSettings(): Promise<AttendanceSettings | null>;
   exportSettings(settings: AttendanceSettings): Promise<boolean>;
   saveSettings(settings: AttendanceSettings): Promise<AttendanceSettings>;

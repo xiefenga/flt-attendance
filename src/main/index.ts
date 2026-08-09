@@ -30,42 +30,6 @@ interface NativeApi {
   ): string;
 }
 
-const DEFAULT_SETTINGS: AttendanceSettings = {
-  specialPersonnel: {
-    punchMealNoOvertime: [
-      { employeeNo: "22017", name: "袁亚鸿" },
-      { employeeNo: "22018", name: "刘苏伟" },
-      { employeeNo: "23035", name: "郑立明" },
-      { employeeNo: "23041", name: "王善鹤" },
-      { employeeNo: "23095", name: "吴通" },
-      { employeeNo: "26265", name: "刘景超" },
-      { employeeNo: "26266", name: "李培丞" },
-      { employeeNo: "", name: "吴晶晶" }
-    ],
-    noPunchMealNoOvertime: [
-      { employeeNo: "25196", name: "李阳" },
-      { employeeNo: "25182", name: "欧智元" },
-      { employeeNo: "24135", name: "张丽雯" }
-    ],
-    noMealNoOvertime: [
-      { employeeNo: "17003", name: "李欣" },
-      { employeeNo: "24151", name: "李述华" },
-      { employeeNo: "24168", name: "晁伟" },
-      { employeeNo: "26281", name: "陈冬冬" }
-    ],
-    flexibleArrivalShift: [
-      { employeeNo: "26333", name: "张一成" }
-    ],
-    sixDayNoMeal: [
-      { employeeNo: "", name: "廖传兰" }
-    ],
-    sixDayFourHourNoMeal: [
-      { employeeNo: "", name: "廖传霞" }
-    ]
-  },
-  excludedPersonnel: []
-};
-
 const SPECIAL_GROUPS = [
   "punchMealNoOvertime",
   "noPunchMealNoOvertime",
@@ -74,6 +38,20 @@ const SPECIAL_GROUPS = [
   "sixDayNoMeal",
   "sixDayFourHourNoMeal"
 ] as const;
+
+function emptySettings(): AttendanceSettings {
+  return {
+    specialPersonnel: {
+      punchMealNoOvertime: [],
+      noPunchMealNoOvertime: [],
+      noMealNoOvertime: [],
+      flexibleArrivalShift: [],
+      sixDayNoMeal: [],
+      sixDayFourHourNoMeal: []
+    },
+    excludedPersonnel: []
+  };
+}
 
 const require = createRequire(__filename);
 let mainWindow: BrowserWindow | null = null;
@@ -120,10 +98,7 @@ function normalizeSpecialPersonnel(value: unknown): SpecialPersonnelConfig {
   const employeeNumbers = new Set<string>();
   const namesWithoutNumber = new Set<string>();
   for (const group of SPECIAL_GROUPS) {
-    const rawPeople = record[group] ??
-      (["flexibleArrivalShift", "sixDayNoMeal", "sixDayFourHourNoMeal"].includes(group)
-        ? DEFAULT_SETTINGS.specialPersonnel[group]
-        : undefined);
+    const rawPeople = record[group] ?? [];
     if (!Array.isArray(rawPeople)) throw new Error("特殊人员配置缺少分组");
     config[group] = rawPeople.map(normalizePerson);
     for (const person of config[group]) {
@@ -179,7 +154,7 @@ async function readSettings(): Promise<AttendanceSettings> {
         return normalizeSettings(JSON.parse(legacy));
       } catch (legacyError) {
         if ((legacyError as NodeJS.ErrnoException).code === "ENOENT") {
-          return structuredClone(DEFAULT_SETTINGS);
+          return emptySettings();
         }
         throw legacyError;
       }
@@ -284,7 +259,6 @@ function registerIpc(): void {
   });
 
   ipcMain.handle("attendance:get-settings", () => readSettings());
-  ipcMain.handle("attendance:get-default-settings", () => structuredClone(DEFAULT_SETTINGS));
   ipcMain.handle("attendance:import-settings", async () => {
     const result = mainWindow
       ? await dialog.showOpenDialog(mainWindow, {

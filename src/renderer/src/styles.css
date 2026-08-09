@@ -227,9 +227,11 @@ main { width: min(100%, 920px); height: calc(100% - 44px); margin: 0 auto; paddi
 .person-row button:hover { color: var(--danger); }
 .person-empty { height: 100%; display: grid; place-items: center; color: var(--meta); font-size: 12px; }
 .settings-add { margin-top: 14px; padding: 13px 14px 14px; border: 1px solid var(--border); border-radius: var(--radius-md); background: rgb(255 255 255 / 72%); }
-.settings-add > strong { display: block; margin-bottom: 9px; font-size: 12px; }
-.settings-add-fields { display: grid; grid-template-columns: 1.3fr 1.5fr .75fr .8fr auto; gap: 8px; }
-.settings-add-fields.is-excluded { grid-template-columns: 1.5fr .75fr .8fr auto; }
+.settings-add-heading { margin-bottom: 9px; display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+.settings-add-heading strong { font-size: 12px; }
+.settings-add-heading span { color: var(--meta); font-size: 11px; }
+.settings-add-fields { display: grid; grid-template-columns: minmax(220px, 1.15fr) minmax(220px, 1fr) auto; gap: 8px; }
+.settings-add-fields.is-excluded { grid-template-columns: minmax(260px, 1fr) auto; }
 .settings-add .secondary-button { min-height: 38px; }
 .settings-footer { min-height: 52px; padding-top: 14px; display: flex; align-items: center; justify-content: flex-end; gap: 9px; }
 .settings-footer .primary-button, .settings-footer .secondary-button { min-width: 88px; min-height: 40px; }
