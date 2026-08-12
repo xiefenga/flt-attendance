@@ -79,8 +79,20 @@ fn parses_and_reconciles_real_dingtalk_export() {
 
     assert_eq!(report.summary_rows.len(), 236);
     assert_eq!(report.exception_rows.len(), 59);
-    assert_eq!(source_weekday_overtime, report_weekday_overtime);
-    assert_eq!(source_weekend_overtime, report_weekend_overtime);
+    assert!(report_weekday_overtime <= source_weekday_overtime);
+    assert!(report_weekend_overtime <= source_weekend_overtime);
+    assert!(
+        report
+            .summary_rows
+            .iter()
+            .flat_map(|row| [
+                row.weekday_overtime_hours,
+                row.weekend_overtime_hours,
+                row.holiday_overtime_hours,
+            ])
+            .all(|hours| (hours * 2.0 - (hours * 2.0).round()).abs() < 0.001),
+        "折算后的月度加班必须以半小时为单位"
+    );
     assert!(
         report
             .summary_rows

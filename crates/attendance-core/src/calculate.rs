@@ -74,6 +74,79 @@ pub fn calculate_attendance(dataset: &AttendanceDataset) -> AttendanceReport {
     calculate_attendance_with_config(dataset, &AttendanceConfig::default())
 }
 
+fn payable_overtime_hours(hours: f64) -> f64 {
+    if hours < 1.0 {
+        0.0
+    } else {
+        (hours * 2.0).floor() / 2.0
+    }
+}
+
+fn normalize_overtime_categories(mut hours: [f64; 3], total: f64) -> (f64, f64, f64) {
+    let difference = total - hours.iter().sum::<f64>();
+    if difference > 0.001 {
+        let largest = hours
+            .iter()
+            .enumerate()
+            .max_by(|(_, left), (_, right)| left.total_cmp(right))
+            .map(|(index, _)| index)
+            .unwrap_or(0);
+        hours[largest] += difference;
+    } else if difference < -0.001 {
+        let mut excess = -difference;
+        while excess > 0.001 {
+            let largest = hours
+                .iter()
+                .enumerate()
+                .max_by(|(_, left), (_, right)| left.total_cmp(right))
+                .map(|(index, _)| index)
+                .unwrap_or(0);
+            let reduction = hours[largest].min(excess);
+            hours[largest] -= reduction;
+            excess -= reduction;
+        }
+    }
+
+    let mut normalized = hours.map(|value| (value * 2.0).floor() / 2.0);
+    let mut remaining_units = ((total - normalized.iter().sum::<f64>()) * 2.0)
+        .round()
+        .max(0.0) as usize;
+    let mut remainders = [
+        hours[0] - normalized[0],
+        hours[1] - normalized[1],
+        hours[2] - normalized[2],
+    ];
+    while remaining_units > 0 {
+        let largest = remainders
+            .iter()
+            .enumerate()
+            .max_by(|(_, left), (_, right)| left.total_cmp(right))
+            .map(|(index, _)| index)
+            .unwrap_or(0);
+        normalized[largest] += 0.5;
+        remainders[largest] = -1.0;
+        remaining_units -= 1;
+    }
+    (normalized[0], normalized[1], normalized[2])
+}
+
+fn overtime_summary(days: &[DailyAttendance], year: u16, month: u8) -> (f64, f64, f64) {
+    let mut weekday = 0.0;
+    let mut weekend = 0.0;
+    let mut holiday = 0.0;
+    for (index, day) in days.iter().enumerate() {
+        let calendar_day = (index + 1) as u8;
+        if crate::holiday::is_workday(year, month, calendar_day) {
+            weekday += day.overtime_hours;
+        } else if crate::holiday::is_holiday(year, month, calendar_day) {
+            holiday += day.overtime_hours;
+        } else {
+            weekend += day.overtime_hours;
+        }
+    }
+    (weekday, weekend, holiday)
+}
+
 pub fn calculate_attendance_with_config(
     dataset: &AttendanceDataset,
     config: &AttendanceConfig,
@@ -208,24 +281,6 @@ pub fn calculate_attendance_with_config(
         let expected_attendance_hours = expected_days * standard_daily_hours;
         let normal_attendance_hours =
             (expected_attendance_hours - leave_hours - absent_hours).max(0.0);
-        let weekday_overtime_hours = if excludes_overtime {
-            0.0
-        } else {
-            monthly.weekday_overtime_hours
-        };
-        let weekend_overtime_hours = if excludes_overtime {
-            0.0
-        } else {
-            monthly.weekend_overtime_hours
-        };
-        let holiday_overtime_hours = if excludes_overtime {
-            0.0
-        } else {
-            monthly.holiday_overtime_hours
-        };
-        let overtime_hours =
-            weekday_overtime_hours + weekend_overtime_hours + holiday_overtime_hours;
-
         let (attendance_meal_count, overtime_meal_count) = calculate_meal_allowance(
             monthly,
             &active_daily_records,
@@ -235,6 +290,61 @@ pub fn calculate_attendance_with_config(
             uses_flexible_arrival_shift,
             employment,
         );
+        let mut days = build_daily_attendance(
+            monthly,
+            daily_records,
+            dataset.period.year,
+            dataset.period.month,
+            uses_flexible_arrival_shift,
+            employment,
+        );
+        let has_daily_overtime = days.iter().any(|day| day.overtime_hours > 0.0);
+        let raw_daily_overtime = overtime_summary(&days, dataset.period.year, dataset.period.month);
+        for day in &mut days {
+            day.overtime_hours = if excludes_overtime {
+                0.0
+            } else {
+                payable_overtime_hours(day.overtime_hours)
+            };
+        }
+        let (weekday_overtime_hours, weekend_overtime_hours, holiday_overtime_hours) =
+            if excludes_overtime {
+                (0.0, 0.0, 0.0)
+            } else if has_daily_overtime {
+                let payable_daily =
+                    overtime_summary(&days, dataset.period.year, dataset.period.month);
+                let raw_daily_total =
+                    raw_daily_overtime.0 + raw_daily_overtime.1 + raw_daily_overtime.2;
+                let monthly_total = monthly.weekday_overtime_hours
+                    + monthly.weekend_overtime_hours
+                    + monthly.holiday_overtime_hours;
+                if (raw_daily_total - monthly_total).abs() < 0.001 {
+                    normalize_overtime_categories(
+                        [
+                            (monthly.weekday_overtime_hours
+                                - (raw_daily_overtime.0 - payable_daily.0))
+                                .max(0.0),
+                            (monthly.weekend_overtime_hours
+                                - (raw_daily_overtime.1 - payable_daily.1))
+                                .max(0.0),
+                            (monthly.holiday_overtime_hours
+                                - (raw_daily_overtime.2 - payable_daily.2))
+                                .max(0.0),
+                        ],
+                        payable_daily.0 + payable_daily.1 + payable_daily.2,
+                    )
+                } else {
+                    payable_daily
+                }
+            } else {
+                (
+                    payable_overtime_hours(monthly.weekday_overtime_hours),
+                    payable_overtime_hours(monthly.weekend_overtime_hours),
+                    payable_overtime_hours(monthly.holiday_overtime_hours),
+                )
+            };
+        let overtime_hours =
+            weekday_overtime_hours + weekend_overtime_hours + holiday_overtime_hours;
         let summary = SummaryRow {
             employee_no: monthly.employee_no.clone(),
             name: monthly.name.clone(),
@@ -258,19 +368,6 @@ pub fn calculate_attendance_with_config(
             childcare_leave_hours,
             absent_hours,
         };
-        let mut days = build_daily_attendance(
-            monthly,
-            daily_records,
-            dataset.period.year,
-            dataset.period.month,
-            uses_flexible_arrival_shift,
-            employment,
-        );
-        if excludes_overtime {
-            for day in &mut days {
-                day.overtime_hours = 0.0;
-            }
-        }
         let employment_company = employment.filter(|record| !record.company.trim().is_empty());
         detail_rows.push(DetailRow {
             employee_no: monthly.employee_no.clone(),
@@ -1166,6 +1263,33 @@ mod tests {
         daily
     }
 
+    fn empty_monthly_record() -> crate::model::MonthlyRecord {
+        crate::model::MonthlyRecord {
+            employee_key: "10001".to_owned(),
+            employee_no: "10001".to_owned(),
+            name: "测试员工".to_owned(),
+            user_id: String::new(),
+            attendance_group: String::new(),
+            department: String::new(),
+            position: String::new(),
+            attendance_days: 0.0,
+            weekday_overtime_hours: 0.0,
+            weekend_overtime_hours: 0.0,
+            holiday_overtime_hours: 0.0,
+            personal_leave_hours: 0.0,
+            compensatory_leave_hours: 0.0,
+            sick_leave_hours: 0.0,
+            annual_leave_hours: 0.0,
+            maternity_leave_days: 0.0,
+            paternity_leave_days: 0.0,
+            marriage_leave_days: 0.0,
+            menstrual_leave_days: 0.0,
+            bereavement_leave_days: 0.0,
+            breastfeeding_leave_hours: 0.0,
+            daily_results: vec![],
+        }
+    }
+
     #[test]
     fn parses_shift_and_next_day_times() {
         assert_eq!(
@@ -1185,6 +1309,121 @@ mod tests {
             extract_amount_before("育儿假07-01 3.5小时", "小时"),
             Some(3.5)
         );
+    }
+
+    #[test]
+    fn overtime_starts_at_one_hour_and_increases_by_completed_half_hours() {
+        for (source, expected) in [
+            (0.0, 0.0),
+            (0.99, 0.0),
+            (1.0, 1.0),
+            (1.49, 1.0),
+            (1.5, 1.5),
+            (1.99, 1.5),
+            (2.0, 2.0),
+            (2.49, 2.0),
+            (2.5, 2.5),
+        ] {
+            assert_eq!(payable_overtime_hours(source), expected, "source={source}");
+        }
+        let categories = normalize_overtime_categories([0.26, 0.26, 0.48], 1.0);
+        assert_eq!(categories, (0.0, 0.5, 0.5));
+        assert_eq!(categories.0 + categories.1 + categories.2, 1.0);
+    }
+
+    #[test]
+    fn overtime_increment_applies_to_daily_monthly_and_actual_attendance() {
+        let monthly = crate::model::MonthlyRecord {
+            employee_key: "10001".to_owned(),
+            employee_no: "10001".to_owned(),
+            name: "测试员工".to_owned(),
+            user_id: String::new(),
+            attendance_group: String::new(),
+            department: String::new(),
+            position: String::new(),
+            attendance_days: 3.0,
+            weekday_overtime_hours: 5.97,
+            weekend_overtime_hours: 0.0,
+            holiday_overtime_hours: 0.0,
+            personal_leave_hours: 0.0,
+            compensatory_leave_hours: 0.0,
+            sick_leave_hours: 0.0,
+            annual_leave_hours: 0.0,
+            maternity_leave_days: 0.0,
+            paternity_leave_days: 0.0,
+            marriage_leave_days: 0.0,
+            menstrual_leave_days: 0.0,
+            bereavement_leave_days: 0.0,
+            breastfeeding_leave_hours: 0.0,
+            daily_results: vec![String::new(); 3],
+        };
+        let daily = [1.49, 1.99, 2.49]
+            .into_iter()
+            .enumerate()
+            .map(|(index, overtime_hours)| DailyRecord {
+                employee_key: "10001".to_owned(),
+                employee_no: "10001".to_owned(),
+                name: "测试员工".to_owned(),
+                date: format!("26-07-{:02}", index + 1),
+                shift: "默认班次 08:30-17:30".to_owned(),
+                overtime_hours,
+                punch_slots: vec![],
+                late_count: 0.0,
+                severe_late_count: 0.0,
+                absent_late_days: 0.0,
+                early_count: 0.0,
+                missing_in_count: 0.0,
+                missing_out_count: 0.0,
+                absent_days: 0.0,
+            })
+            .collect();
+        let report = calculate_attendance(&AttendanceDataset {
+            period: crate::model::AttendancePeriod {
+                year: 2026,
+                month: 7,
+            },
+            monthly: vec![monthly],
+            daily,
+            invalid_punches: vec![],
+            employment_records: vec![],
+        });
+
+        let detail = &report.detail_rows[0];
+        assert_eq!(
+            detail.days[..3]
+                .iter()
+                .map(|day| day.overtime_hours)
+                .collect::<Vec<_>>(),
+            vec![1.0, 1.5, 2.0]
+        );
+        assert_eq!(detail.summary.weekday_overtime_hours, 4.5);
+        assert_eq!(detail.summary.weekend_overtime_hours, 0.0);
+        assert_eq!(detail.summary.holiday_overtime_hours, 0.0);
+        assert_eq!(detail.summary.actual_attendance_hours, Some(28.5));
+    }
+
+    #[test]
+    fn monthly_overtime_is_used_when_daily_overtime_is_unavailable() {
+        let mut monthly = empty_monthly_record();
+        monthly.weekday_overtime_hours = 1.49;
+        monthly.weekend_overtime_hours = 1.99;
+        monthly.holiday_overtime_hours = 2.49;
+        let report = calculate_attendance(&AttendanceDataset {
+            period: crate::model::AttendancePeriod {
+                year: 2026,
+                month: 7,
+            },
+            monthly: vec![monthly],
+            daily: vec![],
+            invalid_punches: vec![],
+            employment_records: vec![],
+        });
+
+        let summary = &report.summary_rows[0];
+        assert_eq!(summary.weekday_overtime_hours, 1.0);
+        assert_eq!(summary.weekend_overtime_hours, 1.5);
+        assert_eq!(summary.holiday_overtime_hours, 2.0);
+        assert_eq!(summary.actual_attendance_hours, Some(4.5));
     }
 
     #[test]

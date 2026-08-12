@@ -65,6 +65,15 @@ pub(crate) fn is_off_day(year: u16, month: u8, day: u8) -> bool {
     !is_workday(year, month, day)
 }
 
+pub(crate) fn is_holiday(year: u16, month: u8, day: u8) -> bool {
+    let date = format!("{year:04}-{month:02}-{day:02}");
+    calendars()
+        .iter()
+        .find(|calendar| calendar.year == year)
+        .and_then(|calendar| calendar.days.iter().find(|item| item.date == date))
+        .is_some_and(|item| item.is_off_day)
+}
+
 pub(crate) fn is_saturday(year: u16, month: u8, day: u8) -> bool {
     weekday_index(year, month, day) == 6
 }
@@ -100,7 +109,9 @@ mod tests {
     fn calendar_overrides_weekends_and_weekdays() {
         assert!(has_calendar(2026));
         assert!(!is_workday(2026, 1, 1));
+        assert!(is_holiday(2026, 1, 1));
         assert!(is_workday(2026, 1, 4));
+        assert!(!is_holiday(2026, 1, 4));
         assert!(!is_workday(2026, 2, 23));
         assert!(is_workday(2026, 2, 28));
     }
