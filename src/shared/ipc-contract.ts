@@ -42,6 +42,7 @@ export interface SpecialPersonnelConfig {
 export interface AttendanceSettings {
   specialPersonnel: SpecialPersonnelConfig;
   excludedPersonnel: SpecialPerson[];
+  statutoryHolidayDates: string[];
 }
 
 export interface InspectResponse {

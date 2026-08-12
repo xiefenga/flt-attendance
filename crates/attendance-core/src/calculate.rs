@@ -130,16 +130,21 @@ fn normalize_overtime_categories(mut hours: [f64; 3], total: f64) -> (f64, f64, 
     (normalized[0], normalized[1], normalized[2])
 }
 
-fn overtime_summary(days: &[DailyAttendance], year: u16, month: u8) -> (f64, f64, f64) {
+fn overtime_summary(
+    days: &[DailyAttendance],
+    year: u16,
+    month: u8,
+    config: &AttendanceConfig,
+) -> (f64, f64, f64) {
     let mut weekday = 0.0;
     let mut weekend = 0.0;
     let mut holiday = 0.0;
     for (index, day) in days.iter().enumerate() {
         let calendar_day = (index + 1) as u8;
-        if crate::holiday::is_workday(year, month, calendar_day) {
-            weekday += day.overtime_hours;
-        } else if crate::holiday::is_holiday(year, month, calendar_day) {
+        if config.is_statutory_holiday(year, month, calendar_day) {
             holiday += day.overtime_hours;
+        } else if crate::holiday::is_workday(year, month, calendar_day) {
+            weekday += day.overtime_hours;
         } else {
             weekend += day.overtime_hours;
         }
@@ -171,6 +176,8 @@ pub fn calculate_attendance_with_config(
     let mut summary_rows = Vec::with_capacity(dataset.monthly.len());
     let mut exception_rows = Vec::new();
     let mut unclassified_late_events = 0_u32;
+    let has_statutory_holiday_override = config.has_statutory_holiday_override(dataset.period.year);
+    let mut statutory_holiday_override_missing_daily_data = false;
 
     for monthly in dataset
         .monthly
@@ -299,7 +306,8 @@ pub fn calculate_attendance_with_config(
             employment,
         );
         let has_daily_overtime = days.iter().any(|day| day.overtime_hours > 0.0);
-        let raw_daily_overtime = overtime_summary(&days, dataset.period.year, dataset.period.month);
+        let raw_daily_overtime =
+            overtime_summary(&days, dataset.period.year, dataset.period.month, config);
         for day in &mut days {
             day.overtime_hours = if excludes_overtime {
                 0.0
@@ -312,13 +320,15 @@ pub fn calculate_attendance_with_config(
                 (0.0, 0.0, 0.0)
             } else if has_daily_overtime {
                 let payable_daily =
-                    overtime_summary(&days, dataset.period.year, dataset.period.month);
+                    overtime_summary(&days, dataset.period.year, dataset.period.month, config);
                 let raw_daily_total =
                     raw_daily_overtime.0 + raw_daily_overtime.1 + raw_daily_overtime.2;
                 let monthly_total = monthly.weekday_overtime_hours
                     + monthly.weekend_overtime_hours
                     + monthly.holiday_overtime_hours;
-                if (raw_daily_total - monthly_total).abs() < 0.001 {
+                if has_statutory_holiday_override {
+                    payable_daily
+                } else if (raw_daily_total - monthly_total).abs() < 0.001 {
                     normalize_overtime_categories(
                         [
                             (monthly.weekday_overtime_hours
@@ -337,6 +347,14 @@ pub fn calculate_attendance_with_config(
                     payable_daily
                 }
             } else {
+                if has_statutory_holiday_override
+                    && monthly.weekday_overtime_hours
+                        + monthly.weekend_overtime_hours
+                        + monthly.holiday_overtime_hours
+                        > 0.001
+                {
+                    statutory_holiday_override_missing_daily_data = true;
+                }
                 (
                     payable_overtime_hours(monthly.weekday_overtime_hours),
                     payable_overtime_hours(monthly.weekend_overtime_hours),
@@ -434,6 +452,19 @@ pub fn calculate_attendance_with_config(
             "未内置 {} 年法定节假日数据：暂按普通工作日和周末判断。",
             dataset.period.year
         ));
+    }
+    if has_statutory_holiday_override {
+        warnings.push(format!(
+            "已按设置中的 {} 个三倍工资日重新划分 {} 年周末与法定加班。",
+            config.statutory_holiday_count(dataset.period.year),
+            dataset.period.year
+        ));
+    }
+    if statutory_holiday_override_missing_daily_data {
+        warnings.push(
+            "部分人员缺少每日加班数据，无法按三倍工资日重新划分；相关人员暂沿用钉钉月度加班分类。"
+                .to_owned(),
+        );
     }
     let matched_special_people = config.special_personnel.matched_count(
         dataset
@@ -1263,6 +1294,25 @@ mod tests {
         daily
     }
 
+    fn overtime_daily(date: &str, overtime_hours: f64) -> DailyRecord {
+        DailyRecord {
+            employee_key: "10001".to_owned(),
+            employee_no: "10001".to_owned(),
+            name: "测试员工".to_owned(),
+            date: date.to_owned(),
+            shift: "休息".to_owned(),
+            overtime_hours,
+            punch_slots: vec![],
+            late_count: 0.0,
+            severe_late_count: 0.0,
+            absent_late_days: 0.0,
+            early_count: 0.0,
+            missing_in_count: 0.0,
+            missing_out_count: 0.0,
+            absent_days: 0.0,
+        }
+    }
+
     fn empty_monthly_record() -> crate::model::MonthlyRecord {
         crate::model::MonthlyRecord {
             employee_key: "10001".to_owned(),
@@ -1424,6 +1474,43 @@ mod tests {
         assert_eq!(summary.weekend_overtime_hours, 1.5);
         assert_eq!(summary.holiday_overtime_hours, 2.0);
         assert_eq!(summary.actual_attendance_hours, Some(4.5));
+    }
+
+    #[test]
+    fn configured_triple_pay_dates_reclassify_other_holiday_days_as_weekends() {
+        let mut monthly = empty_monthly_record();
+        monthly.holiday_overtime_hours = 6.0;
+        let dataset = AttendanceDataset {
+            period: crate::model::AttendancePeriod {
+                year: 2026,
+                month: 9,
+            },
+            monthly: vec![monthly],
+            daily: vec![
+                overtime_daily("26-09-25", 2.0),
+                overtime_daily("26-09-26", 2.0),
+                overtime_daily("26-09-27", 2.0),
+            ],
+            invalid_punches: vec![],
+            employment_records: vec![],
+        };
+
+        let fallback = calculate_attendance(&dataset);
+        assert_eq!(fallback.summary_rows[0].holiday_overtime_hours, 6.0);
+        assert_eq!(fallback.summary_rows[0].weekend_overtime_hours, 0.0);
+
+        let configured = calculate_attendance_with_config(
+            &dataset,
+            &AttendanceConfig {
+                statutory_holiday_dates: vec!["2026-09-25".to_owned()],
+                ..Default::default()
+            },
+        );
+        assert_eq!(configured.summary_rows[0].holiday_overtime_hours, 2.0);
+        assert_eq!(configured.summary_rows[0].weekend_overtime_hours, 4.0);
+        assert!(configured.warnings.iter().any(|warning| {
+            warning.contains("已按设置中的 1 个三倍工资日重新划分 2026 年")
+        }));
     }
 
     #[test]

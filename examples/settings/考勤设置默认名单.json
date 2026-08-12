@@ -31,5 +31,6 @@
       { "employeeNo": "", "name": "廖传霞" }
     ]
   },
-  "excludedPersonnel": []
+  "excludedPersonnel": [],
+  "statutoryHolidayDates": []
 }

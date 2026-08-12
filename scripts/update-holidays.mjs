@@ -11,6 +11,7 @@ const outputDirectory = path.join(
 );
 const requestedYears = process.argv.slice(2).map(Number);
 const years = requestedYears.length ? requestedYears : [new Date().getFullYear()];
+const downloadTimeoutMs = 15_000;
 
 function validateCalendar(data, expectedYear) {
   if (!data || data.year !== expectedYear) {
@@ -49,7 +50,9 @@ for (const year of years) {
   const destination = path.join(outputDirectory, `${year}.json`);
   const source = `https://raw.githubusercontent.com/NateScarlet/holiday-cn/master/${year}.json`;
   try {
-    const response = await fetch(source);
+    const response = await fetch(source, {
+      signal: AbortSignal.timeout(downloadTimeoutMs)
+    });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const data = await response.json();
     validateCalendar(data, year);

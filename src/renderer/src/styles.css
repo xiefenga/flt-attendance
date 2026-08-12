@@ -207,11 +207,20 @@ main { width: min(100%, 920px); height: calc(100% - 44px); margin: 0 auto; paddi
 .settings-menu-button { width: 100%; min-height: 60px; padding: 12px 16px; display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; gap: 13px; border: 1px solid var(--border); border-radius: var(--radius-md); color: var(--foreground); background: rgb(255 255 255 / 72%); cursor: pointer; text-align: left; }
 .settings-menu-button:hover { border-color: #c4c7d5; background: var(--surface-warm); }
 .settings-menu strong { font-size: 15px; font-weight: 650; }
+.settings-menu-label { min-width: 0; display: flex; align-items: center; gap: 9px; }
+.settings-menu-label svg { flex: 0 0 auto; color: var(--muted); }
 .settings-menu-count { min-width: 28px; height: 24px; padding: 0 7px; display: grid; place-items: center; border-radius: 999px; color: var(--muted); background: var(--border-soft); font-size: 11px; }
 .settings-menu-arrow { color: var(--meta); font-size: 24px; font-weight: 300; }
 .settings-groups { margin-top: 22px; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
 .excluded-list { margin-top: 22px; }
 .excluded-list .person-list { height: 260px; }
+.holiday-settings { margin-top: 22px; }
+.holiday-settings-note { margin-bottom: 12px; padding: 13px 15px; border: 1px solid rgb(167 123 62 / 24%); border-radius: var(--radius-md); background: rgb(167 123 62 / 7%); }
+.holiday-settings-note strong { font-size: 13px; }
+.holiday-settings-note p { margin: 4px 0 0; color: var(--muted); font-size: 12px; line-height: 1.6; }
+.holiday-list .person-list { height: 220px; }
+.holiday-row strong { font-family: var(--mono); }
+.holiday-add-fields { display: grid; grid-template-columns: minmax(220px, 1fr) auto; gap: 8px; }
 .settings-group { min-width: 0; border: 1px solid var(--border); border-radius: var(--radius-md); background: rgb(255 255 255 / 72%); overflow: hidden; }
 .settings-group-heading { min-height: 58px; padding: 12px 14px; display: flex; align-items: center; justify-content: space-between; gap: 8px; border-bottom: 1px solid var(--border-soft); background: var(--surface-warm); }
 .settings-group-heading h3 { margin: 0; font-size: 14px; font-weight: 650; }

@@ -49,7 +49,8 @@ function emptySettings(): AttendanceSettings {
       sixDayNoMeal: [],
       sixDayFourHourNoMeal: []
     },
-    excludedPersonnel: []
+    excludedPersonnel: [],
+    statutoryHolidayDates: []
   };
 }
 
@@ -146,7 +147,23 @@ function normalizeSettings(value: unknown): AttendanceSettings {
     }
     used.add(key);
   }
-  return { specialPersonnel, excludedPersonnel };
+  const rawStatutoryHolidayDates = record.statutoryHolidayDates ?? [];
+  if (!Array.isArray(rawStatutoryHolidayDates)) throw new Error("三倍工资日配置格式错误");
+  const statutoryHolidayDates = rawStatutoryHolidayDates.map((date) => {
+    if (typeof date !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+      throw new Error("三倍工资日必须使用 YYYY-MM-DD 格式");
+    }
+    const parsed = new Date(`${date}T00:00:00Z`);
+    if (Number.isNaN(parsed.getTime()) || parsed.toISOString().slice(0, 10) !== date) {
+      throw new Error(`三倍工资日 ${date} 不是有效日期`);
+    }
+    return date;
+  });
+  if (new Set(statutoryHolidayDates).size !== statutoryHolidayDates.length) {
+    throw new Error("三倍工资日不能重复配置");
+  }
+  statutoryHolidayDates.sort();
+  return { specialPersonnel, excludedPersonnel, statutoryHolidayDates };
 }
 
 async function readSettings(): Promise<AttendanceSettings> {

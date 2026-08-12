@@ -7,6 +7,8 @@ pub struct AttendanceConfig {
     pub special_personnel: SpecialPersonnelConfig,
     #[serde(default)]
     pub excluded_personnel: Vec<SpecialPerson>,
+    #[serde(default)]
+    pub statutory_holiday_dates: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -134,6 +136,37 @@ impl AttendanceConfig {
             .filter(|(employee_no, name)| self.excludes_employee(employee_no, name))
             .count()
     }
+
+    pub fn has_statutory_holiday_override(&self, year: u16) -> bool {
+        self.statutory_holiday_dates
+            .iter()
+            .any(|date| date_year(date) == Some(year))
+    }
+
+    pub fn statutory_holiday_count(&self, year: u16) -> usize {
+        self.statutory_holiday_dates
+            .iter()
+            .filter(|date| date_year(date) == Some(year))
+            .count()
+    }
+
+    pub(crate) fn is_statutory_holiday(&self, year: u16, month: u8, day: u8) -> bool {
+        if !self.has_statutory_holiday_override(year) {
+            return crate::holiday::is_holiday(year, month, day);
+        }
+        let expected = format!("{year:04}-{month:02}-{day:02}");
+        self.statutory_holiday_dates
+            .iter()
+            .any(|date| date == &expected)
+    }
+}
+
+fn date_year(date: &str) -> Option<u16> {
+    let (year, remainder) = date.split_once('-')?;
+    if year.len() != 4 || remainder.len() != 5 {
+        return None;
+    }
+    year.parse().ok()
 }
 
 impl SpecialPerson {
@@ -221,5 +254,25 @@ mod tests {
         };
         assert!(config.excludes_employee("25181", "李文祥"));
         assert!(!config.excludes_employee("25182", "李文祥"));
+    }
+
+    #[test]
+    fn statutory_holiday_dates_override_one_year_only() {
+        let config = AttendanceConfig {
+            statutory_holiday_dates: vec!["2026-09-25".to_owned()],
+            ..Default::default()
+        };
+        assert!(config.has_statutory_holiday_override(2026));
+        assert_eq!(config.statutory_holiday_count(2026), 1);
+        assert!(config.is_statutory_holiday(2026, 9, 25));
+        assert!(!config.is_statutory_holiday(2026, 9, 26));
+        assert!(!config.has_statutory_holiday_override(2025));
+    }
+
+    #[test]
+    fn empty_statutory_holiday_dates_keep_embedded_calendar_behavior() {
+        let config = AttendanceConfig::default();
+        assert!(config.is_statutory_holiday(2026, 9, 25));
+        assert!(config.is_statutory_holiday(2026, 9, 26));
     }
 }

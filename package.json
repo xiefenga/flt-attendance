@@ -1,7 +1,7 @@
 {
   "name": "flt-attendance",
   "productName": "福拉特考勤统计",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "description": "离线钉钉考勤统计工具",
   "author": "FLT Attendance",
   "license": "UNLICENSED",

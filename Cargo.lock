@@ -26,7 +26,7 @@ dependencies = [
 
 [[package]]
 name = "attendance-cli"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "anyhow",
  "attendance-core",
@@ -35,7 +35,7 @@ dependencies = [
 
 [[package]]
 name = "attendance-core"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "calamine",
  "rust_xlsxwriter",
@@ -46,7 +46,7 @@ dependencies = [
 
 [[package]]
 name = "attendance-napi"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "attendance-core",
  "napi",

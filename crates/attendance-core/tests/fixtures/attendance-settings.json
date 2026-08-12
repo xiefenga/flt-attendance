@@ -8,5 +8,6 @@
   },
   "excludedPersonnel": [
     { "employeeNo": "25181", "name": "李文祥" }
-  ]
+  ],
+  "statutoryHolidayDates": []
 }

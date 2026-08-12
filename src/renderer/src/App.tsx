@@ -1,6 +1,7 @@
 import { useState } from "react";
 import {
   BookOpenText,
+  CalendarDays,
   Check,
   CircleCheck,
   ChevronLeft,
@@ -13,6 +14,7 @@ import {
 import { Markdown } from "@tanstack/markdown/react";
 
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import {
   Dialog,
   DialogContent,
@@ -40,7 +42,7 @@ import type {
 } from "../../shared/ipc-contract";
 
 type BusyState = "idle" | "validating" | "generating";
-type SettingsPage = "home" | "special" | "excluded";
+type SettingsPage = "home" | "special" | "excluded" | "holidays";
 
 const SPECIAL_GROUPS: Array<{
   key: SpecialPersonnelGroup;
@@ -86,7 +88,8 @@ function cloneSpecialPersonnel(config: SpecialPersonnelConfig): SpecialPersonnel
 function cloneSettings(settings: AttendanceSettings): AttendanceSettings {
   return {
     specialPersonnel: cloneSpecialPersonnel(settings.specialPersonnel),
-    excludedPersonnel: settings.excludedPersonnel.map((person) => ({ ...person }))
+    excludedPersonnel: settings.excludedPersonnel.map((person) => ({ ...person })),
+    statutoryHolidayDates: [...settings.statutoryHolidayDates]
   };
 }
 
@@ -133,6 +136,7 @@ export default function App() {
   const [settingsNotice, setSettingsNotice] = useState<string | null>(null);
   const [addGroup, setAddGroup] = useState<SpecialPersonnelGroup>("punchMealNoOvertime");
   const [currentEmployeeIndex, setCurrentEmployeeIndex] = useState<string | undefined>();
+  const [newStatutoryHolidayDate, setNewStatutoryHolidayDate] = useState("");
 
   const ready = file !== null && inspect !== null && busy === "idle";
   const configuredPeople = settingsDraft
@@ -205,6 +209,7 @@ export default function App() {
       setSettingsDraft(cloneSettings(loaded));
       setSettingsPage("home");
       setCurrentEmployeeIndex(undefined);
+      setNewStatutoryHolidayDate("");
       setSettingsOpen(true);
     } catch (caught) {
       setError(readableError(caught));
@@ -262,6 +267,30 @@ export default function App() {
     setSettingsDraft({
       ...settingsDraft,
       excludedPersonnel: settingsDraft.excludedPersonnel.filter((_, itemIndex) => itemIndex !== index)
+    });
+  }
+
+  function addStatutoryHolidayDate() {
+    if (!settingsDraft || !newStatutoryHolidayDate) return;
+    if (settingsDraft.statutoryHolidayDates.includes(newStatutoryHolidayDate)) {
+      setSettingsError(`${newStatutoryHolidayDate} 已经配置`);
+      return;
+    }
+    setSettingsDraft({
+      ...settingsDraft,
+      statutoryHolidayDates: [...settingsDraft.statutoryHolidayDates, newStatutoryHolidayDate].sort()
+    });
+    setNewStatutoryHolidayDate("");
+    setSettingsError(null);
+  }
+
+  function removeStatutoryHolidayDate(index: number) {
+    if (!settingsDraft) return;
+    setSettingsDraft({
+      ...settingsDraft,
+      statutoryHolidayDates: settingsDraft.statutoryHolidayDates.filter(
+        (_, itemIndex) => itemIndex !== index
+      )
     });
   }
 
@@ -405,7 +434,7 @@ export default function App() {
           <div className="settings-heading">
             <div>
               {settingsPage !== "home" ? <Button variant="ghost" className="settings-back" type="button" onClick={() => setSettingsPage("home")}><ChevronLeft size={14} />返回设置</Button> : null}
-              <DialogTitle className="settings-title">{settingsPage === "home" ? "设置" : settingsPage === "special" ? "特殊人员" : "不参与考勤人员"}</DialogTitle>
+              <DialogTitle className="settings-title">{settingsPage === "home" ? "设置" : settingsPage === "special" ? "特殊人员" : settingsPage === "excluded" ? "不参与考勤人员" : "三倍工资日"}</DialogTitle>
             </div>
             {settingsPage === "home" ? <div className="settings-tools">
               <Button variant="ghost" type="button" onClick={() => void importSettings()}>导入</Button>
@@ -420,6 +449,14 @@ export default function App() {
             }}>
               <strong>特殊人员</strong>
               <span className="settings-menu-count">{specialPersonnelCount(settingsDraft)}</span>
+              <ChevronRight className="settings-menu-arrow" size={20} />
+            </Button>
+            <Button variant="ghost" className="settings-menu-button" type="button" onClick={() => {
+              setNewStatutoryHolidayDate("");
+              setSettingsPage("holidays");
+            }}>
+              <span className="settings-menu-label"><CalendarDays size={18} /><strong>三倍工资日</strong></span>
+              <span className="settings-menu-count">{settingsDraft?.statutoryHolidayDates.length ?? 0}</span>
               <ChevronRight className="settings-menu-arrow" size={20} />
             </Button>
             <Button variant="ghost" className="settings-menu-button" type="button" onClick={() => {
@@ -466,7 +503,38 @@ export default function App() {
             </ScrollArea>
           </div> : null}
 
-          {settingsPage !== "home" ? <div className="settings-add">
+          {settingsPage === "holidays" ? <div className="holiday-settings">
+            <div className="holiday-settings-note">
+              <strong>按年份覆盖法定加班分类</strong>
+              <p>某年添加任意日期后，该年只有清单中的日期计入法定加班（三倍工资），其他放假日计入周末加班。某年未添加日期时，继续沿用开源日历，将法定节假日连休的每一天都计入法定加班。</p>
+            </div>
+            <div className="settings-group holiday-list">
+              <div className="settings-group-heading">
+                <h3>已维护日期</h3>
+                <span>{settingsDraft?.statutoryHolidayDates.length ?? 0}</span>
+              </div>
+              <ScrollArea className="person-list">
+                {settingsDraft?.statutoryHolidayDates.length ? settingsDraft.statutoryHolidayDates.map((date, index) => (
+                  <div className="person-row holiday-row" key={date}>
+                    <div><strong>{date}</strong><span>{date.slice(0, 4)} 年三倍工资日</span></div>
+                    <Button variant="dangerGhost" type="button" aria-label={`删除${date}`} title="删除" onClick={() => removeStatutoryHolidayDate(index)}><Trash2 size={14} /></Button>
+                  </div>
+                )) : <span className="person-empty">尚未维护，将沿用开源日历的现有分类</span>}
+              </ScrollArea>
+            </div>
+            <div className="settings-add">
+              <div className="settings-add-heading">
+                <strong>添加三倍工资日</strong>
+                <span>请选择实际法定节日当天</span>
+              </div>
+              <div className="holiday-add-fields">
+                <Input type="date" aria-label="三倍工资日期" value={newStatutoryHolidayDate} onChange={(event) => setNewStatutoryHolidayDate(event.target.value)} />
+                <Button type="button" disabled={!newStatutoryHolidayDate} onClick={addStatutoryHolidayDate}>添加</Button>
+              </div>
+            </div>
+          </div> : null}
+
+          {settingsPage !== "home" && settingsPage !== "holidays" ? <div className="settings-add">
             <div className="settings-add-heading">
               <strong>添加人员</strong>
               <span>{inspect ? "人员信息来自当前考勤报表" : "请先在首页选择考勤报表"}</span>
