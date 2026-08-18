@@ -82,16 +82,20 @@ fn payable_overtime_hours(hours: f64) -> f64 {
     }
 }
 
-fn exclude_dinner_break_from_overtime(hours: f64, daily: &DailyRecord) -> f64 {
+fn exclude_dinner_break_from_overtime(
+    hours: f64,
+    daily: &DailyRecord,
+    application_start: Option<u32>,
+) -> f64 {
     const DINNER_BREAK_START: u32 = 17 * 60 + 30;
     const DINNER_OVERTIME_THRESHOLD: u32 = 19 * 60 + 30;
 
     if hours <= 0.0 {
         return hours;
     }
-    if punch_range(daily).is_some_and(|(first_in, last_out)| {
-        first_in <= DINNER_BREAK_START && last_out >= DINNER_OVERTIME_THRESHOLD
-    }) {
+    if application_start.is_some_and(|start| start <= DINNER_BREAK_START)
+        && last_out_minutes(daily).is_some_and(|last_out| last_out >= DINNER_OVERTIME_THRESHOLD)
+    {
         (hours - 0.5).max(0.0)
     } else {
         hours
@@ -643,13 +647,17 @@ fn punch_range(daily: &DailyRecord) -> Option<(u32, u32)> {
         .filter(|slot| slot.kind == PunchKind::In)
         .filter_map(|slot| parse_punch_minutes(&slot.time))
         .min()?;
-    let last_out = daily
+    let last_out = last_out_minutes(daily)?;
+    (last_out >= first_in).then_some((first_in, last_out))
+}
+
+fn last_out_minutes(daily: &DailyRecord) -> Option<u32> {
+    daily
         .punch_slots
         .iter()
         .filter(|slot| slot.kind == PunchKind::Out)
         .filter_map(|slot| parse_punch_minutes(&slot.time))
-        .max()?;
-    (last_out >= first_in).then_some((first_in, last_out))
+        .max()
 }
 
 fn expected_workday_end(daily: &DailyRecord, uses_flexible_arrival_shift: bool) -> Option<u32> {
@@ -841,12 +849,18 @@ fn build_daily_attendance(
             "√".to_owned()
         };
         let mut overtime_hours = daily.map(|row| row.overtime_hours).unwrap_or(0.0);
+        let mut overtime_application_start = None;
         for part in result
             .split(',')
             .map(str::trim)
             .filter(|part| !part.is_empty())
         {
             if part.starts_with("加班") {
+                if let Some(start) = extract_clock_minutes(part).first().copied() {
+                    overtime_application_start = Some(
+                        overtime_application_start.map_or(start, |current: u32| current.min(start)),
+                    );
+                }
                 if daily.is_none() {
                     overtime_hours += extract_amount_before(part, "小时").unwrap_or(0.0);
                 }
@@ -860,7 +874,11 @@ fn build_daily_attendance(
             }
         }
         if let Some(daily) = daily {
-            overtime_hours = exclude_dinner_break_from_overtime(overtime_hours, daily);
+            overtime_hours = exclude_dinner_break_from_overtime(
+                overtime_hours,
+                daily,
+                overtime_application_start,
+            );
         }
 
         if result.contains("旷工") {
@@ -1522,6 +1540,11 @@ mod tests {
     fn dinner_break_is_excluded_at_1930_before_half_hour_rounding() {
         let mut monthly = empty_monthly_record();
         monthly.weekday_overtime_hours = 5.49;
+        monthly.daily_results = vec![
+            "加班07-01 17:30到07-01 19:29 2小时".to_owned(),
+            "加班07-02 17:30到07-02 19:30 2小时".to_owned(),
+            "加班07-03 17:30到07-03 19:30 1.49小时".to_owned(),
+        ];
         let dataset = AttendanceDataset {
             period: crate::model::AttendancePeriod {
                 year: 2026,
@@ -1552,9 +1575,22 @@ mod tests {
     }
 
     #[test]
-    fn dinner_break_is_not_subtracted_when_work_starts_after_1730() {
-        let daily = overtime_daily_with_punches("26-07-01", "18:00", "21:00", 3.0);
-        assert_eq!(exclude_dinner_break_from_overtime(3.0, &daily), 3.0);
+    fn dinner_break_is_not_subtracted_when_application_starts_after_1730() {
+        let daily = overtime_daily_with_punches("26-07-01", "08:30", "21:00", 3.0);
+        assert_eq!(
+            exclude_dinner_break_from_overtime(3.0, &daily, Some(18 * 60)),
+            3.0
+        );
+    }
+
+    #[test]
+    fn dinner_break_uses_application_start_instead_of_first_punch() {
+        let daily = overtime_daily_with_punches("26-07-01", "18:00", "21:00", 3.5);
+        assert_eq!(
+            exclude_dinner_break_from_overtime(3.5, &daily, Some(17 * 60 + 30)),
+            3.0
+        );
+        assert_eq!(exclude_dinner_break_from_overtime(3.5, &daily, None), 3.5);
     }
 
     #[test]
