@@ -82,6 +82,22 @@ fn payable_overtime_hours(hours: f64) -> f64 {
     }
 }
 
+fn exclude_dinner_break_from_overtime(hours: f64, daily: &DailyRecord) -> f64 {
+    const DINNER_BREAK_START: u32 = 17 * 60 + 30;
+    const DINNER_OVERTIME_THRESHOLD: u32 = 19 * 60 + 30;
+
+    if hours <= 0.0 {
+        return hours;
+    }
+    if punch_range(daily).is_some_and(|(first_in, last_out)| {
+        first_in <= DINNER_BREAK_START && last_out >= DINNER_OVERTIME_THRESHOLD
+    }) {
+        (hours - 0.5).max(0.0)
+    } else {
+        hours
+    }
+}
+
 fn normalize_overtime_categories(mut hours: [f64; 3], total: f64) -> (f64, f64, f64) {
     let difference = total - hours.iter().sum::<f64>();
     if difference > 0.001 {
@@ -843,6 +859,9 @@ fn build_daily_attendance(
                     .push(day_index);
             }
         }
+        if let Some(daily) = daily {
+            overtime_hours = exclude_dinner_break_from_overtime(overtime_hours, daily);
+        }
 
         if result.contains("旷工") {
             let hours = daily.map(|row| row.absent_days * 8.0).unwrap_or(8.0);
@@ -1313,6 +1332,29 @@ mod tests {
         }
     }
 
+    fn overtime_daily_with_punches(
+        date: &str,
+        first_in: &str,
+        last_out: &str,
+        overtime_hours: f64,
+    ) -> DailyRecord {
+        let mut daily = overtime_daily(date, overtime_hours);
+        daily.shift = "默认班次 08:30-17:30".to_owned();
+        daily.punch_slots = vec![
+            crate::model::PunchSlot {
+                kind: PunchKind::In,
+                time: first_in.to_owned(),
+                result: "正常".to_owned(),
+            },
+            crate::model::PunchSlot {
+                kind: PunchKind::Out,
+                time: last_out.to_owned(),
+                result: "正常".to_owned(),
+            },
+        ];
+        daily
+    }
+
     fn empty_monthly_record() -> crate::model::MonthlyRecord {
         crate::model::MonthlyRecord {
             employee_key: "10001".to_owned(),
@@ -1474,6 +1516,45 @@ mod tests {
         assert_eq!(summary.weekend_overtime_hours, 1.5);
         assert_eq!(summary.holiday_overtime_hours, 2.0);
         assert_eq!(summary.actual_attendance_hours, Some(4.5));
+    }
+
+    #[test]
+    fn dinner_break_is_excluded_at_1930_before_half_hour_rounding() {
+        let mut monthly = empty_monthly_record();
+        monthly.weekday_overtime_hours = 5.49;
+        let dataset = AttendanceDataset {
+            period: crate::model::AttendancePeriod {
+                year: 2026,
+                month: 7,
+            },
+            monthly: vec![monthly],
+            daily: vec![
+                overtime_daily_with_punches("26-07-01", "08:30", "19:29", 2.0),
+                overtime_daily_with_punches("26-07-02", "08:30", "19:30", 2.0),
+                overtime_daily_with_punches("26-07-03", "08:30", "19:30", 1.49),
+            ],
+            invalid_punches: vec![],
+            employment_records: vec![],
+        };
+
+        let report = calculate_attendance(&dataset);
+        let detail = &report.detail_rows[0];
+        assert_eq!(
+            detail.days[..3]
+                .iter()
+                .map(|day| day.overtime_hours)
+                .collect::<Vec<_>>(),
+            vec![2.0, 1.5, 0.0]
+        );
+        assert_eq!(detail.summary.weekday_overtime_hours, 3.5);
+        assert_eq!(detail.summary.actual_attendance_hours, Some(27.5));
+        assert_eq!(detail.summary.overtime_meal_count, 1.0);
+    }
+
+    #[test]
+    fn dinner_break_is_not_subtracted_when_work_starts_after_1730() {
+        let daily = overtime_daily_with_punches("26-07-01", "18:00", "21:00", 3.0);
+        assert_eq!(exclude_dinner_break_from_overtime(3.0, &daily), 3.0);
     }
 
     #[test]

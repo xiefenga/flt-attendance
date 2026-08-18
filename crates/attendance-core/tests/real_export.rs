@@ -144,7 +144,7 @@ fn parses_and_reconciles_real_dingtalk_export() {
         .find(|row| row.name == "李文祥")
         .expect("应包含李文祥");
     assert_eq!(li_wenxiang.expected_attendance_hours, 184.0);
-    assert_eq!(li_wenxiang.actual_attendance_hours, Some(309.5));
+    assert_eq!(li_wenxiang.actual_attendance_hours, Some(297.5));
 
     let li_wenxiang_detail = report
         .detail_rows
@@ -154,7 +154,7 @@ fn parses_and_reconciles_real_dingtalk_export() {
     assert_eq!(li_wenxiang_detail.company, "烨成");
     assert_eq!(li_wenxiang_detail.days.len(), 31);
     assert_eq!(li_wenxiang_detail.days[0].attendance, "√");
-    assert_eq!(li_wenxiang_detail.days[0].overtime_hours, 6.0);
+    assert_eq!(li_wenxiang_detail.days[0].overtime_hours, 5.5);
     assert_eq!(li_wenxiang_detail.days[4].attendance, "☆");
 
     let liu_hanfu = report
