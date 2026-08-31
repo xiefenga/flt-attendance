@@ -13,6 +13,7 @@ pub struct AttendanceDataset {
     pub daily: Vec<DailyRecord>,
     pub invalid_punches: Vec<InvalidPunch>,
     pub employment_records: Vec<EmploymentRecord>,
+    pub annual_leave_records: Vec<AnnualLeaveRecord>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq, PartialOrd, Ord)]
@@ -29,6 +30,14 @@ pub struct EmploymentRecord {
     pub company: String,
     pub hire_date: Option<CalendarDate>,
     pub termination_date: Option<CalendarDate>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct AnnualLeaveRecord {
+    pub employee_no: String,
+    pub name: String,
+    pub company: String,
+    pub balance_before_month_hours: f64,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]

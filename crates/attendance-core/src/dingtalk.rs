@@ -6,12 +6,13 @@ use serde::Serialize;
 use thiserror::Error;
 
 use crate::model::{
-    AttendanceDataset, AttendancePeriod, CalendarDate, DailyRecord, EmploymentRecord, InvalidPunch,
-    MonthlyRecord, PunchKind, PunchSlot,
+    AnnualLeaveRecord, AttendanceDataset, AttendancePeriod, CalendarDate, DailyRecord,
+    EmploymentRecord, InvalidPunch, MonthlyRecord, PunchKind, PunchSlot,
 };
 
 const REQUIRED_SHEETS: [&str; 4] = ["打卡时间", "原始记录", "月度汇总", "每日统计"];
 const EMPLOYMENT_SHEETS: [&str; 2] = ["入职名单", "离职名单"];
+const ANNUAL_LEAVE_SHEET: &str = "年假信息";
 
 #[derive(Debug, Error)]
 pub enum DingtalkError {
@@ -78,6 +79,7 @@ pub fn inspect_dingtalk(path: impl AsRef<Path>) -> Result<WorkbookSummary, Dingt
                 .into_iter()
                 .filter(|name| available.contains(*name)),
         )
+        .chain(std::iter::once(ANNUAL_LEAVE_SHEET).filter(|name| available.contains(*name)))
         .collect::<Vec<_>>();
     let mut sheets = Vec::with_capacity(inspected_sheets.len());
     let mut employee_list = Vec::new();
@@ -103,6 +105,7 @@ pub fn inspect_dingtalk(path: impl AsRef<Path>) -> Result<WorkbookSummary, Dingt
 
         let header_rows = match sheet_name {
             "入职名单" | "离职名单" => 1,
+            ANNUAL_LEAVE_SHEET => 3,
             "打卡时间" | "月度汇总" | "每日统计" => 4,
             _ => 3,
         };
@@ -110,12 +113,15 @@ pub fn inspect_dingtalk(path: impl AsRef<Path>) -> Result<WorkbookSummary, Dingt
         let mut data_rows = 0;
 
         for row in range.rows().skip(header_rows) {
-            if cell_text(row.first()).is_empty() {
+            let (employee_no, employee_name) = if sheet_name == ANNUAL_LEAVE_SHEET {
+                (cell_text(row.first()), cell_text(row.get(1)))
+            } else {
+                (cell_text(row.get(3)), cell_text(row.first()))
+            };
+            if employee_name.is_empty() {
                 continue;
             }
             data_rows += 1;
-            let employee_no = cell_text(row.get(3));
-            let employee_name = cell_text(row.first());
             employees.insert((employee_no, employee_name));
         }
 
@@ -152,6 +158,7 @@ pub fn load_dingtalk(path: impl AsRef<Path>) -> Result<AttendanceDataset, Dingta
     validate_headers("原始记录", &raw_range)?;
     let invalid_punches = parse_invalid_punches(&raw_range);
     let employment_records = parse_employment_records(&mut workbook)?;
+    let annual_leave_records = parse_annual_leave_records(&mut workbook)?;
 
     Ok(AttendanceDataset {
         period,
@@ -159,7 +166,40 @@ pub fn load_dingtalk(path: impl AsRef<Path>) -> Result<AttendanceDataset, Dingta
         daily,
         invalid_punches,
         employment_records,
+        annual_leave_records,
     })
+}
+
+fn parse_annual_leave_records<RS>(
+    workbook: &mut calamine::Sheets<RS>,
+) -> Result<Vec<AnnualLeaveRecord>, DingtalkError>
+where
+    RS: std::io::Read + std::io::Seek,
+{
+    if !workbook
+        .sheet_names()
+        .iter()
+        .any(|name| name == ANNUAL_LEAVE_SHEET)
+    {
+        return Ok(Vec::new());
+    }
+
+    let range = workbook.worksheet_range(ANNUAL_LEAVE_SHEET)?;
+    validate_headers(ANNUAL_LEAVE_SHEET, &range)?;
+    Ok(range
+        .rows()
+        .skip(3)
+        .filter_map(|row| {
+            let name = cell_text(row.get(1));
+            let balance_before_month_hours = cell_optional_number(row.get(9))?;
+            (!name.is_empty()).then(|| AnnualLeaveRecord {
+                employee_no: cell_text(row.first()),
+                name,
+                company: cell_text(row.get(2)),
+                balance_before_month_hours,
+            })
+        })
+        .collect())
 }
 
 fn parse_employment_records<RS>(
@@ -507,18 +547,19 @@ fn validate_headers(sheet_name: &str, range: &calamine::Range<Data>) -> Result<(
         ][..],
         "入职名单" => &["姓名", "工号", "入职日期"][..],
         "离职名单" => &["姓名", "工号", "离职日期"][..],
+        ANNUAL_LEAVE_SHEET => &["工号", "姓名", "公司", "截止当前月剩余（小时）"][..],
         _ => &[][..],
     };
 
     let header_rows = range.rows().take(4);
     let present: HashSet<String> = header_rows
         .flat_map(|row| row.iter())
-        .map(|cell| cell.to_string())
+        .map(|cell| normalized_header(&cell.to_string()))
         .collect();
     let missing: Vec<&str> = required
         .iter()
         .copied()
-        .filter(|header| !present.contains(*header))
+        .filter(|header| !present.contains(&normalized_header(header)))
         .collect();
 
     if missing.is_empty() {
@@ -529,6 +570,13 @@ fn validate_headers(sheet_name: &str, range: &calamine::Range<Data>) -> Result<(
             missing: missing.join("、"),
         })
     }
+}
+
+fn normalized_header(value: &str) -> String {
+    value
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .collect()
 }
 
 fn cell_text(cell: Option<&Data>) -> String {
@@ -544,6 +592,15 @@ fn cell_number(cell: Option<&Data>) -> f64 {
         Some(Data::Int(value)) => *value as f64,
         Some(Data::String(value)) => value.trim().parse().unwrap_or(0.0),
         _ => 0.0,
+    }
+}
+
+fn cell_optional_number(cell: Option<&Data>) -> Option<f64> {
+    match cell {
+        Some(Data::Float(value)) => Some(*value),
+        Some(Data::Int(value)) => Some(*value as f64),
+        Some(Data::String(value)) => value.trim().parse().ok(),
+        _ => None,
     }
 }
 

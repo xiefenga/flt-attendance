@@ -4,7 +4,9 @@ use serde::Serialize;
 
 use crate::config::AttendanceConfig;
 use crate::holiday;
-use crate::model::{AttendanceDataset, CalendarDate, DailyRecord, EmploymentRecord, PunchKind};
+use crate::model::{
+    AnnualLeaveRecord, AttendanceDataset, CalendarDate, DailyRecord, EmploymentRecord, PunchKind,
+};
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct AttendanceReport {
@@ -68,6 +70,13 @@ pub struct ExceptionRow {
     pub out_of_range: u32,
     pub score: f64,
     pub notes: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum AnnualLeaveMatch {
+    Matched(f64),
+    Missing,
+    Ambiguous,
 }
 
 pub fn calculate_attendance(dataset: &AttendanceDataset) -> AttendanceReport {
@@ -172,6 +181,60 @@ fn overtime_summary(
     (weekday, weekend, holiday)
 }
 
+fn normalized_employee_name(name: &str) -> &str {
+    name.trim()
+        .strip_suffix("（离职）")
+        .or_else(|| name.trim().strip_suffix("(离职)"))
+        .unwrap_or_else(|| name.trim())
+}
+
+fn annual_leave_balance_before_month(
+    records: &[AnnualLeaveRecord],
+    employee_no: &str,
+    name: &str,
+    company: &str,
+) -> AnnualLeaveMatch {
+    if !employee_no.trim().is_empty() {
+        let employee_matches = records
+            .iter()
+            .filter(|record| {
+                !record.employee_no.trim().is_empty()
+                    && record.employee_no.trim() == employee_no.trim()
+            })
+            .collect::<Vec<_>>();
+        match employee_matches.as_slice() {
+            [record] => {
+                return AnnualLeaveMatch::Matched(record.balance_before_month_hours);
+            }
+            [_, _, ..] => return AnnualLeaveMatch::Ambiguous,
+            [] => {}
+        }
+    }
+
+    let normalized_name = normalized_employee_name(name);
+    let name_matches = records
+        .iter()
+        .filter(|record| normalized_employee_name(&record.name) == normalized_name)
+        .collect::<Vec<_>>();
+    match name_matches.as_slice() {
+        [] => AnnualLeaveMatch::Missing,
+        [record] => AnnualLeaveMatch::Matched(record.balance_before_month_hours),
+        candidates => {
+            let company_matches = candidates
+                .iter()
+                .copied()
+                .filter(|record| {
+                    !company.trim().is_empty() && record.company.trim() == company.trim()
+                })
+                .collect::<Vec<_>>();
+            match company_matches.as_slice() {
+                [record] => AnnualLeaveMatch::Matched(record.balance_before_month_hours),
+                _ => AnnualLeaveMatch::Ambiguous,
+            }
+        }
+    }
+}
+
 pub fn calculate_attendance_with_config(
     dataset: &AttendanceDataset,
     config: &AttendanceConfig,
@@ -196,6 +259,8 @@ pub fn calculate_attendance_with_config(
     let mut summary_rows = Vec::with_capacity(dataset.monthly.len());
     let mut exception_rows = Vec::new();
     let mut unclassified_late_events = 0_u32;
+    let mut annual_leave_missing_employees = 0_usize;
+    let mut annual_leave_ambiguous_employees = 0_usize;
     let has_statutory_holiday_override = config.has_statutory_holiday_override(dataset.period.year);
     let mut statutory_holiday_override_missing_daily_data = false;
 
@@ -228,6 +293,10 @@ pub fn calculate_attendance_with_config(
             &monthly.employee_no,
             &monthly.name,
         );
+        let employment_company = employment.filter(|record| !record.company.trim().is_empty());
+        let company = employment_company
+            .map(|record| record.company.clone())
+            .unwrap_or_else(|| company_from_attendance_group(&monthly.attendance_group));
         let active_daily_records = daily_records
             .iter()
             .copied()
@@ -383,6 +452,25 @@ pub fn calculate_attendance_with_config(
             };
         let overtime_hours =
             weekday_overtime_hours + weekend_overtime_hours + holiday_overtime_hours;
+        let annual_leave_balance_hours = match annual_leave_balance_before_month(
+            &dataset.annual_leave_records,
+            &monthly.employee_no,
+            &monthly.name,
+            &company,
+        ) {
+            AnnualLeaveMatch::Matched(balance_before_month) => {
+                let balance = balance_before_month - monthly.annual_leave_hours;
+                Some(if balance.abs() < 0.001 { 0.0 } else { balance })
+            }
+            AnnualLeaveMatch::Missing => {
+                annual_leave_missing_employees += 1;
+                None
+            }
+            AnnualLeaveMatch::Ambiguous => {
+                annual_leave_ambiguous_employees += 1;
+                None
+            }
+        };
         let summary = SummaryRow {
             employee_no: monthly.employee_no.clone(),
             name: monthly.name.clone(),
@@ -396,7 +484,7 @@ pub fn calculate_attendance_with_config(
             expected_attendance_hours,
             actual_attendance_hours: Some(normal_attendance_hours + overtime_hours),
             annual_leave_hours: monthly.annual_leave_hours,
-            annual_leave_balance_hours: None,
+            annual_leave_balance_hours,
             sick_leave_hours: monthly.sick_leave_hours,
             personal_leave_hours: monthly.personal_leave_hours,
             breastfeeding_leave_hours: monthly.breastfeeding_leave_hours,
@@ -406,13 +494,10 @@ pub fn calculate_attendance_with_config(
             childcare_leave_hours,
             absent_hours,
         };
-        let employment_company = employment.filter(|record| !record.company.trim().is_empty());
         detail_rows.push(DetailRow {
             employee_no: monthly.employee_no.clone(),
             name: monthly.name.clone(),
-            company: employment_company
-                .map(|record| record.company.clone())
-                .unwrap_or_else(|| company_from_attendance_group(&monthly.attendance_group)),
+            company,
             company_from_employment: employment_company.is_some(),
             works_saturdays: uses_six_day_schedule,
             days,
@@ -436,12 +521,34 @@ pub fn calculate_attendance_with_config(
     }
 
     let mut warnings = vec![
-        "年假剩余未计算：钉钉报表不含期初余额。".to_owned(),
         "本应出勤：一般人员按有效班次日 × 8 小时；不打卡人员按法定工作日 × 8 小时；六天制人员按周一至周六及配置的每日小时数计算。"
             .to_owned(),
         "出差天数：按月度汇总中的出差日期计。".to_owned(),
         "不在范围内打卡：按原始记录中的“当前不在可打卡的时间范围”计。".to_owned(),
     ];
+    if dataset.annual_leave_records.is_empty() {
+        warnings.insert(
+            0,
+            "年假剩余未计算：未读取到“年假信息”工作表或其中没有有效余额。".to_owned(),
+        );
+    } else {
+        if annual_leave_ambiguous_employees > 0 {
+            warnings.insert(
+                0,
+                format!(
+                    "年假余额匹配不唯一 {annual_leave_ambiguous_employees} 人：请在“年假信息”中补充工号，结果留空。"
+                ),
+            );
+        }
+        if annual_leave_missing_employees > 0 {
+            warnings.insert(
+                0,
+                format!(
+                    "年假余额未匹配 {annual_leave_missing_employees} 人：在“年假信息”中未找到对应工号或姓名，结果留空。"
+                ),
+            );
+        }
+    }
     if dataset.employment_records.is_empty() {
         warnings.push(
             "未读取到入职名单/离职名单：无法按在职区间裁剪考勤，新员工入职当天餐补例外未应用。"
@@ -1496,6 +1603,7 @@ mod tests {
             daily,
             invalid_punches: vec![],
             employment_records: vec![],
+            annual_leave_records: vec![],
         });
 
         let detail = &report.detail_rows[0];
@@ -1527,6 +1635,7 @@ mod tests {
             daily: vec![],
             invalid_punches: vec![],
             employment_records: vec![],
+            annual_leave_records: vec![],
         });
 
         let summary = &report.summary_rows[0];
@@ -1534,6 +1643,56 @@ mod tests {
         assert_eq!(summary.weekend_overtime_hours, 1.5);
         assert_eq!(summary.holiday_overtime_hours, 2.0);
         assert_eq!(summary.actual_attendance_hours, Some(4.5));
+    }
+
+    #[test]
+    fn annual_leave_balance_subtracts_current_month_usage() {
+        let mut monthly = empty_monthly_record();
+        monthly.annual_leave_hours = 3.5;
+        let report = calculate_attendance(&AttendanceDataset {
+            period: crate::model::AttendancePeriod {
+                year: 2026,
+                month: 7,
+            },
+            monthly: vec![monthly],
+            daily: vec![],
+            invalid_punches: vec![],
+            employment_records: vec![],
+            annual_leave_records: vec![AnnualLeaveRecord {
+                employee_no: String::new(),
+                name: "测试员工".to_owned(),
+                company: "JSFAE".to_owned(),
+                balance_before_month_hours: 32.5,
+            }],
+        });
+
+        assert_eq!(
+            report.summary_rows[0].annual_leave_balance_hours,
+            Some(29.0)
+        );
+    }
+
+    #[test]
+    fn duplicate_annual_leave_names_without_employee_numbers_are_ambiguous() {
+        let records = vec![
+            AnnualLeaveRecord {
+                employee_no: String::new(),
+                name: "同名员工".to_owned(),
+                company: "JSFAE".to_owned(),
+                balance_before_month_hours: 8.0,
+            },
+            AnnualLeaveRecord {
+                employee_no: String::new(),
+                name: "同名员工".to_owned(),
+                company: "JSFAE".to_owned(),
+                balance_before_month_hours: 16.0,
+            },
+        ];
+
+        assert_eq!(
+            annual_leave_balance_before_month(&records, "10001", "同名员工", "JSFAE"),
+            AnnualLeaveMatch::Ambiguous
+        );
     }
 
     #[test]
@@ -1558,6 +1717,7 @@ mod tests {
             ],
             invalid_punches: vec![],
             employment_records: vec![],
+            annual_leave_records: vec![],
         };
 
         let report = calculate_attendance(&dataset);
@@ -1610,6 +1770,7 @@ mod tests {
             ],
             invalid_punches: vec![],
             employment_records: vec![],
+            annual_leave_records: vec![],
         };
 
         let fallback = calculate_attendance(&dataset);
@@ -1948,6 +2109,7 @@ mod tests {
             daily: vec![],
             invalid_punches: vec![],
             employment_records: vec![employment],
+            annual_leave_records: vec![],
         };
         let report = calculate_attendance_with_config(
             &dataset,

@@ -36,6 +36,10 @@ fn parses_and_reconciles_real_dingtalk_export() {
     assert_eq!(dataset.daily.len(), 7_316);
     assert_eq!(dataset.invalid_punches.len(), 16);
     assert_eq!(dataset.employment_records.len(), 44);
+    assert_eq!(dataset.annual_leave_records.len(), 238);
+    let annual_sheet = summary.sheet("年假信息").expect("应检查年假信息表");
+    assert_eq!(annual_sheet.data_rows, 238);
+    assert_eq!(annual_sheet.unique_employees, 237);
     assert_eq!(
         dataset
             .employment_records
@@ -145,6 +149,29 @@ fn parses_and_reconciles_real_dingtalk_export() {
         .expect("应包含李文祥");
     assert_eq!(li_wenxiang.expected_attendance_hours, 184.0);
     assert_eq!(li_wenxiang.actual_attendance_hours, Some(308.0));
+
+    let ma_zhen = report
+        .summary_rows
+        .iter()
+        .find(|row| row.name == "马镇")
+        .expect("应包含马镇");
+    assert_eq!(ma_zhen.annual_leave_hours, 8.0);
+    assert_eq!(ma_zhen.annual_leave_balance_hours, Some(-6.0));
+
+    assert!(
+        report
+            .summary_rows
+            .iter()
+            .filter(|row| row.name == "李欣")
+            .all(|row| row.annual_leave_balance_hours.is_none()),
+        "年假信息中同名且无工号的人员不能猜测匹配"
+    );
+    assert!(
+        report
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("年假余额匹配不唯一 2 人"))
+    );
 
     let li_wenxiang_detail = report
         .detail_rows
