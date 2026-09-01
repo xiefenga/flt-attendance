@@ -56,6 +56,10 @@ const SPECIAL_GROUPS: Array<{
     title: "按打卡计算餐补"
   },
   {
+    key: "weekdayWeekendPunchMealHolidayOvertime",
+    title: "工作日/周末无加班（法定节假日正常）"
+  },
+  {
     key: "noPunchMealNoOvertime",
     title: "不打卡但有餐补"
   },
@@ -80,6 +84,8 @@ const SPECIAL_GROUPS: Array<{
 function cloneSpecialPersonnel(config: SpecialPersonnelConfig): SpecialPersonnelConfig {
   return {
     punchMealNoOvertime: config.punchMealNoOvertime.map((person) => ({ ...person })),
+    weekdayWeekendPunchMealHolidayOvertime:
+      config.weekdayWeekendPunchMealHolidayOvertime.map((person) => ({ ...person })),
     noPunchMealNoOvertime: config.noPunchMealNoOvertime.map((person) => ({ ...person })),
     noMealNoOvertime: config.noMealNoOvertime.map((person) => ({ ...person })),
     flexibleArrivalShift: config.flexibleArrivalShift.map((person) => ({ ...person })),
@@ -103,6 +109,34 @@ function specialPersonnelCount(settings: AttendanceSettings | null): number {
         0
       )
     : 0;
+}
+
+function matchesPerson(left: SpecialPerson, right: SpecialPerson): boolean {
+  return left.employeeNo && right.employeeNo
+    ? left.employeeNo === right.employeeNo
+    : left.name === right.name;
+}
+
+function specialGroupsCanOverlap(
+  left: SpecialPersonnelGroup,
+  right: SpecialPersonnelGroup
+): boolean {
+  return (left === "punchMealNoOvertime" && right === "flexibleArrivalShift")
+    || (left === "flexibleArrivalShift" && right === "punchMealNoOvertime");
+}
+
+function isAvailableForSpecialGroup(
+  settings: AttendanceSettings,
+  targetGroup: SpecialPersonnelGroup,
+  person: SpecialPerson
+): boolean {
+  if (settings.excludedPersonnel.some((configured) => matchesPerson(configured, person))) {
+    return false;
+  }
+  return !SPECIAL_GROUPS.some((group) =>
+    !specialGroupsCanOverlap(targetGroup, group.key)
+      && settings.specialPersonnel[group.key].some((configured) => matchesPerson(configured, person))
+  );
 }
 
 function formatFileSize(bytes: number): string {
@@ -143,18 +177,18 @@ export default function App() {
   const [newStatutoryHolidayDate, setNewStatutoryHolidayDate] = useState("");
 
   const ready = file !== null && inspect !== null && busy === "idle";
-  const configuredPeople = settingsDraft
-    ? [
+  const availableEmployees = (inspect?.employees ?? [])
+    .filter((employee) => {
+      if (!settingsDraft) return true;
+      const person = { employeeNo: employee.employeeNo, name: employee.name };
+      if (settingsPage === "special") {
+        return isAvailableForSpecialGroup(settingsDraft, addGroup, person);
+      }
+      return ![
         ...SPECIAL_GROUPS.flatMap((group) => settingsDraft.specialPersonnel[group.key]),
         ...settingsDraft.excludedPersonnel
-      ]
-    : [];
-  const availableEmployees = (inspect?.employees ?? [])
-    .filter((employee) => !configuredPeople.some((configured) =>
-      configured.employeeNo && employee.employeeNo
-        ? configured.employeeNo === employee.employeeNo
-        : configured.name === employee.name
-    ));
+      ].some((configured) => matchesPerson(configured, person));
+    });
   const selectedEmployee = currentEmployeeIndex === undefined
     ? null
     : inspect?.employees[Number(currentEmployeeIndex)] ?? null;
@@ -226,20 +260,14 @@ export default function App() {
 
   function addConfiguredPeople(employees: EmployeeIdentity[]) {
     if (!settingsDraft || employees.length === 0) return;
-    const allPeople = [
-      ...SPECIAL_GROUPS.flatMap((group) => settingsDraft.specialPersonnel[group.key]),
-      ...settingsDraft.excludedPersonnel
-    ];
     const people = employees
       .map<SpecialPerson>((employee) => ({
         employeeNo: employee.employeeNo.trim(),
         name: employee.name.trim()
       }))
       .filter((person, index, selected) => {
-        const matches = (existing: SpecialPerson) => existing.employeeNo && person.employeeNo
-          ? existing.employeeNo === person.employeeNo
-          : existing.name === person.name;
-        return !allPeople.some(matches) && selected.findIndex(matches) === index;
+        return isAvailableForSpecialGroup(settingsDraft, addGroup, person)
+          && selected.findIndex((existing) => matchesPerson(existing, person)) === index;
       });
     if (people.length === 0) {
       setSettingsError("所选人员已经配置");

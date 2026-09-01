@@ -17,6 +17,8 @@ pub struct SpecialPersonnelConfig {
     #[serde(default)]
     pub punch_meal_no_overtime: Vec<SpecialPerson>,
     #[serde(default)]
+    pub weekday_weekend_punch_meal_holiday_overtime: Vec<SpecialPerson>,
+    #[serde(default)]
     pub no_punch_meal_no_overtime: Vec<SpecialPerson>,
     #[serde(default)]
     pub no_meal_no_overtime: Vec<SpecialPerson>,
@@ -39,6 +41,13 @@ pub struct SpecialPerson {
 impl SpecialPersonnelConfig {
     pub fn uses_punch_only_meal(&self, employee_no: &str, name: &str) -> bool {
         self.punch_meal_no_overtime
+            .iter()
+            .chain(&self.weekday_weekend_punch_meal_holiday_overtime)
+            .any(|person| person.matches(employee_no, name))
+    }
+
+    pub fn keeps_only_statutory_holiday_overtime(&self, employee_no: &str, name: &str) -> bool {
+        self.weekday_weekend_punch_meal_holiday_overtime
             .iter()
             .any(|person| person.matches(employee_no, name))
     }
@@ -87,6 +96,17 @@ impl SpecialPersonnelConfig {
     pub fn matched_count<'a>(&self, employees: impl Iterator<Item = (&'a str, &'a str)>) -> usize {
         employees
             .filter(|(employee_no, name)| self.excludes_overtime(employee_no, name))
+            .count()
+    }
+
+    pub fn statutory_holiday_overtime_only_matched_count<'a>(
+        &self,
+        employees: impl Iterator<Item = (&'a str, &'a str)>,
+    ) -> usize {
+        employees
+            .filter(|(employee_no, name)| {
+                self.keeps_only_statutory_holiday_overtime(employee_no, name)
+            })
             .count()
     }
 
@@ -220,6 +240,20 @@ mod tests {
         };
         assert!(config.uses_flexible_arrival_shift("26333", "张一成"));
         assert!(!config.excludes_overtime("26333", "张一成"));
+    }
+
+    #[test]
+    fn weekday_weekend_rule_uses_punch_meals_and_keeps_holiday_overtime() {
+        let config = SpecialPersonnelConfig {
+            weekday_weekend_punch_meal_holiday_overtime: vec![SpecialPerson {
+                employee_no: "10001".to_owned(),
+                name: "测试员工".to_owned(),
+            }],
+            ..Default::default()
+        };
+        assert!(config.uses_punch_only_meal("10001", "测试员工"));
+        assert!(config.keeps_only_statutory_holiday_overtime("10001", "测试员工"));
+        assert!(!config.excludes_overtime("10001", "测试员工"));
     }
 
     #[test]

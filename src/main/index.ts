@@ -32,6 +32,7 @@ interface NativeApi {
 
 const SPECIAL_GROUPS = [
   "punchMealNoOvertime",
+  "weekdayWeekendPunchMealHolidayOvertime",
   "noPunchMealNoOvertime",
   "noMealNoOvertime",
   "flexibleArrivalShift",
@@ -39,10 +40,23 @@ const SPECIAL_GROUPS = [
   "sixDayFourHourNoMeal"
 ] as const;
 
+type SpecialGroup = (typeof SPECIAL_GROUPS)[number];
+
+function personKey(person: SpecialPerson): string {
+  return person.employeeNo ? `employee:${person.employeeNo}` : `name:${person.name}`;
+}
+
+function isAllowedSpecialOverlap(groups: ReadonlySet<SpecialGroup>): boolean {
+  return groups.size === 2
+    && groups.has("punchMealNoOvertime")
+    && groups.has("flexibleArrivalShift");
+}
+
 function emptySettings(): AttendanceSettings {
   return {
     specialPersonnel: {
       punchMealNoOvertime: [],
+      weekdayWeekendPunchMealHolidayOvertime: [],
       noPunchMealNoOvertime: [],
       noMealNoOvertime: [],
       flexibleArrivalShift: [],
@@ -102,24 +116,22 @@ function normalizeSpecialPersonnel(value: unknown): SpecialPersonnelConfig {
   if (!value || typeof value !== "object") throw new Error("特殊人员配置格式错误");
   const record = value as Record<string, unknown>;
   const config = {} as SpecialPersonnelConfig;
-  const employeeNumbers = new Set<string>();
-  const namesWithoutNumber = new Set<string>();
+  const configuredGroups = new Map<string, Set<SpecialGroup>>();
   for (const group of SPECIAL_GROUPS) {
     const rawPeople = record[group] ?? [];
     if (!Array.isArray(rawPeople)) throw new Error("特殊人员配置缺少分组");
     config[group] = rawPeople.map(normalizePerson);
     for (const person of config[group]) {
-      if (person.employeeNo) {
-        if (employeeNumbers.has(person.employeeNo)) {
-          throw new Error(`工号 ${person.employeeNo} 不能重复配置`);
-        }
-        employeeNumbers.add(person.employeeNo);
-      } else {
-        if (namesWithoutNumber.has(person.name)) {
-          throw new Error(`${person.name} 不能重复配置`);
-        }
-        namesWithoutNumber.add(person.name);
+      const key = personKey(person);
+      const groups = configuredGroups.get(key) ?? new Set<SpecialGroup>();
+      if (groups.has(group)) {
+        throw new Error(person.employeeNo ? `工号 ${person.employeeNo} 不能重复配置` : `${person.name} 不能重复配置`);
       }
+      groups.add(group);
+      if (groups.size > 1 && !isAllowedSpecialOverlap(groups)) {
+        throw new Error(person.employeeNo ? `工号 ${person.employeeNo} 不能重复配置` : `${person.name} 不能重复配置`);
+      }
+      configuredGroups.set(key, groups);
     }
   }
   return config;
@@ -136,16 +148,16 @@ function normalizeSettings(value: unknown): AttendanceSettings {
   const rawExcluded = record.excludedPersonnel ?? [];
   if (!Array.isArray(rawExcluded)) throw new Error("不参与考勤人员配置格式错误");
   const excludedPersonnel = rawExcluded.map(normalizePerson);
-  const used = new Set<string>();
-  for (const person of [
-    ...SPECIAL_GROUPS.flatMap((group) => specialPersonnel[group]),
-    ...excludedPersonnel
-  ]) {
-    const key = person.employeeNo ? `employee:${person.employeeNo}` : `name:${person.name}`;
-    if (used.has(key)) {
+  const specialPeople = new Set(
+    SPECIAL_GROUPS.flatMap((group) => specialPersonnel[group]).map(personKey)
+  );
+  const usedExcluded = new Set<string>();
+  for (const person of excludedPersonnel) {
+    const key = personKey(person);
+    if (specialPeople.has(key) || usedExcluded.has(key)) {
       throw new Error(person.employeeNo ? `工号 ${person.employeeNo} 不能重复配置` : `${person.name} 不能重复配置`);
     }
-    used.add(key);
+    usedExcluded.add(key);
   }
   const rawStatutoryHolidayDates = record.statutoryHolidayDates ?? [];
   if (!Array.isArray(rawStatutoryHolidayDates)) throw new Error("三倍工资日配置格式错误");

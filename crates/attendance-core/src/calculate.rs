@@ -272,6 +272,9 @@ pub fn calculate_attendance_with_config(
         let excludes_overtime = config
             .special_personnel
             .excludes_overtime(&monthly.employee_no, &monthly.name);
+        let keeps_only_statutory_holiday_overtime = config
+            .special_personnel
+            .keeps_only_statutory_holiday_overtime(&monthly.employee_no, &monthly.name);
         let uses_flexible_arrival_shift = config
             .special_personnel
             .uses_flexible_arrival_shift(&monthly.employee_no, &monthly.name);
@@ -398,58 +401,68 @@ pub fn calculate_attendance_with_config(
         let has_daily_overtime = days.iter().any(|day| day.overtime_hours > 0.0);
         let raw_daily_overtime =
             overtime_summary(&days, dataset.period.year, dataset.period.month, config);
-        for day in &mut days {
+        for (index, day) in days.iter_mut().enumerate() {
             day.overtime_hours = if excludes_overtime {
+                0.0
+            } else if keeps_only_statutory_holiday_overtime
+                && !config.is_statutory_holiday(
+                    dataset.period.year,
+                    dataset.period.month,
+                    (index + 1) as u8,
+                )
+            {
                 0.0
             } else {
                 payable_overtime_hours(day.overtime_hours)
             };
         }
-        let (weekday_overtime_hours, weekend_overtime_hours, holiday_overtime_hours) =
-            if excludes_overtime {
-                (0.0, 0.0, 0.0)
-            } else if has_daily_overtime {
-                let payable_daily =
-                    overtime_summary(&days, dataset.period.year, dataset.period.month, config);
-                let raw_daily_total =
-                    raw_daily_overtime.0 + raw_daily_overtime.1 + raw_daily_overtime.2;
-                let monthly_total = monthly.weekday_overtime_hours
-                    + monthly.weekend_overtime_hours
-                    + monthly.holiday_overtime_hours;
-                if has_statutory_holiday_override {
-                    payable_daily
-                } else if (raw_daily_total - monthly_total).abs() < 0.001 {
-                    normalize_overtime_categories(
-                        [
-                            (monthly.weekday_overtime_hours
-                                - (raw_daily_overtime.0 - payable_daily.0))
-                                .max(0.0),
-                            (monthly.weekend_overtime_hours
-                                - (raw_daily_overtime.1 - payable_daily.1))
-                                .max(0.0),
-                            (monthly.holiday_overtime_hours
-                                - (raw_daily_overtime.2 - payable_daily.2))
-                                .max(0.0),
-                        ],
-                        payable_daily.0 + payable_daily.1 + payable_daily.2,
-                    )
-                } else {
-                    payable_daily
-                }
-            } else {
-                if has_statutory_holiday_override
-                    && monthly.weekday_overtime_hours
-                        + monthly.weekend_overtime_hours
-                        + monthly.holiday_overtime_hours
-                        > 0.001
-                {
-                    statutory_holiday_override_missing_daily_data = true;
-                }
-                (
-                    payable_overtime_hours(monthly.weekday_overtime_hours),
-                    payable_overtime_hours(monthly.weekend_overtime_hours),
-                    payable_overtime_hours(monthly.holiday_overtime_hours),
+        let overtime_categories = if excludes_overtime {
+            (0.0, 0.0, 0.0)
+        } else if has_daily_overtime {
+            let payable_daily =
+                overtime_summary(&days, dataset.period.year, dataset.period.month, config);
+            let raw_daily_total =
+                raw_daily_overtime.0 + raw_daily_overtime.1 + raw_daily_overtime.2;
+            let monthly_total = monthly.weekday_overtime_hours
+                + monthly.weekend_overtime_hours
+                + monthly.holiday_overtime_hours;
+            if has_statutory_holiday_override {
+                payable_daily
+            } else if (raw_daily_total - monthly_total).abs() < 0.001 {
+                normalize_overtime_categories(
+                    [
+                        (monthly.weekday_overtime_hours - (raw_daily_overtime.0 - payable_daily.0))
+                            .max(0.0),
+                        (monthly.weekend_overtime_hours - (raw_daily_overtime.1 - payable_daily.1))
+                            .max(0.0),
+                        (monthly.holiday_overtime_hours - (raw_daily_overtime.2 - payable_daily.2))
+                            .max(0.0),
+                    ],
+                    payable_daily.0 + payable_daily.1 + payable_daily.2,
                 )
+            } else {
+                payable_daily
+            }
+        } else {
+            if has_statutory_holiday_override
+                && monthly.weekday_overtime_hours
+                    + monthly.weekend_overtime_hours
+                    + monthly.holiday_overtime_hours
+                    > 0.001
+            {
+                statutory_holiday_override_missing_daily_data = true;
+            }
+            (
+                payable_overtime_hours(monthly.weekday_overtime_hours),
+                payable_overtime_hours(monthly.weekend_overtime_hours),
+                payable_overtime_hours(monthly.holiday_overtime_hours),
+            )
+        };
+        let (weekday_overtime_hours, weekend_overtime_hours, holiday_overtime_hours) =
+            if keeps_only_statutory_holiday_overtime {
+                (0.0, 0.0, overtime_categories.2)
+            } else {
+                overtime_categories
             };
         let overtime_hours =
             weekday_overtime_hours + weekend_overtime_hours + holiday_overtime_hours;
@@ -604,6 +617,20 @@ pub fn calculate_attendance_with_config(
     if matched_special_people > 0 {
         warnings.push(format!(
             "已按特殊人员配置排除 {matched_special_people} 人的加班时长。"
+        ));
+    }
+    let statutory_holiday_overtime_only_people = config
+        .special_personnel
+        .statutory_holiday_overtime_only_matched_count(
+            dataset
+                .monthly
+                .iter()
+                .filter(|row| !config.excludes_employee(&row.employee_no, &row.name))
+                .map(|row| (row.employee_no.as_str(), row.name.as_str())),
+        );
+    if statutory_holiday_overtime_only_people > 0 {
+        warnings.push(format!(
+            "已对 {statutory_holiday_overtime_only_people} 人清零工作日和周末加班时长，保留法定节假日加班；餐补按实际打卡计算。"
         ));
     }
     let flexible_arrival_people = config.special_personnel.flexible_arrival_matched_count(
@@ -1819,6 +1846,63 @@ mod tests {
         assert!(configured.warnings.iter().any(|warning| {
             warning.contains("已按设置中的 1 个三倍工资日重新划分 2026 年")
         }));
+    }
+
+    #[test]
+    fn weekday_weekend_rule_keeps_only_holiday_overtime_and_punch_meals() {
+        let mut monthly = empty_monthly_record();
+        monthly.daily_results = vec![String::new(); 5];
+        monthly.weekday_overtime_hours = 2.0;
+        monthly.weekend_overtime_hours = 2.0;
+        monthly.holiday_overtime_hours = 2.0;
+        let dataset = AttendanceDataset {
+            period: crate::model::AttendancePeriod {
+                year: 2026,
+                month: 7,
+            },
+            monthly: vec![monthly],
+            daily: vec![
+                overtime_daily_with_punches("26-07-01", "08:30", "19:30", 2.0),
+                overtime_daily_with_punches("26-07-04", "10:00", "12:00", 2.0),
+                overtime_daily_with_punches("26-07-05", "10:00", "12:00", 2.0),
+            ],
+            invalid_punches: vec![],
+            employment_records: vec![],
+            annual_leave_records: vec![],
+        };
+        let report = calculate_attendance_with_config(
+            &dataset,
+            &AttendanceConfig {
+                special_personnel: crate::config::SpecialPersonnelConfig {
+                    weekday_weekend_punch_meal_holiday_overtime: vec![
+                        crate::config::SpecialPerson {
+                            employee_no: "10001".to_owned(),
+                            name: "测试员工".to_owned(),
+                        },
+                    ],
+                    ..Default::default()
+                },
+                statutory_holiday_dates: vec!["2026-07-05".to_owned()],
+                ..Default::default()
+            },
+        );
+
+        let detail = &report.detail_rows[0];
+        assert_eq!(detail.days[0].overtime_hours, 0.0);
+        assert_eq!(detail.days[3].overtime_hours, 0.0);
+        assert_eq!(detail.days[4].overtime_hours, 2.0);
+        assert_eq!(detail.summary.weekday_overtime_hours, 0.0);
+        assert_eq!(detail.summary.weekend_overtime_hours, 0.0);
+        assert_eq!(detail.summary.holiday_overtime_hours, 2.0);
+        assert_eq!(detail.summary.attendance_meal_count, 1.0);
+        assert_eq!(detail.summary.overtime_meal_count, 3.0);
+        assert_eq!(detail.summary.meal_allowance_count, Some(4.0));
+        assert!(
+            report
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("清零工作日和周末加班时长，保留法定节假日加班"))
+        );
     }
 
     #[test]
