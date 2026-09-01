@@ -12,7 +12,7 @@ use crate::model::{
 
 const REQUIRED_SHEETS: [&str; 4] = ["打卡时间", "原始记录", "月度汇总", "每日统计"];
 const EMPLOYMENT_SHEETS: [&str; 2] = ["入职名单", "离职名单"];
-const ANNUAL_LEAVE_SHEET: &str = "年假信息";
+const ANNUAL_LEAVE_SHEET: &str = "年假明细";
 
 #[derive(Debug, Error)]
 pub enum DingtalkError {
@@ -103,11 +103,14 @@ pub fn inspect_dingtalk(path: impl AsRef<Path>) -> Result<WorkbookSummary, Dingt
                 .collect();
         }
 
-        let header_rows = match sheet_name {
-            "入职名单" | "离职名单" => 1,
-            ANNUAL_LEAVE_SHEET => 3,
-            "打卡时间" | "月度汇总" | "每日统计" => 4,
-            _ => 3,
+        let header_rows = if sheet_name == ANNUAL_LEAVE_SHEET {
+            3
+        } else {
+            match sheet_name {
+                "入职名单" | "离职名单" => 1,
+                "打卡时间" | "月度汇总" | "每日统计" => 4,
+                _ => 3,
+            }
         };
         let mut employees = HashSet::new();
         let mut data_rows = 0;
@@ -615,6 +618,7 @@ fn employee_key(employee_no: &str, user_id: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rust_xlsxwriter::Workbook;
 
     #[test]
     fn missing_sheet_error_is_readable() {
@@ -650,5 +654,67 @@ mod tests {
             })
         );
         assert_eq!(date_from_text("2026/2/30"), None);
+    }
+
+    #[test]
+    fn reads_only_annual_leave_detail_sheet() {
+        let temp_dir = std::env::temp_dir();
+        let detail_path = temp_dir.join(format!(
+            "flt-attendance-annual-detail-{}.xlsx",
+            std::process::id()
+        ));
+        let legacy_path = temp_dir.join(format!(
+            "flt-attendance-annual-legacy-{}.xlsx",
+            std::process::id()
+        ));
+
+        write_annual_leave_workbook(&detail_path, "年假明细");
+        let mut detail_workbook = open_workbook_auto(&detail_path).unwrap();
+        let records = parse_annual_leave_records(&mut detail_workbook).unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].employee_no, "24154");
+        assert_eq!(records[0].name, "秦红");
+        assert_eq!(records[0].balance_before_month_hours, 10.5);
+
+        write_annual_leave_workbook(&legacy_path, "年假信息");
+        let mut legacy_workbook = open_workbook_auto(&legacy_path).unwrap();
+        assert!(
+            parse_annual_leave_records(&mut legacy_workbook)
+                .unwrap()
+                .is_empty()
+        );
+
+        std::fs::remove_file(detail_path).unwrap();
+        std::fs::remove_file(legacy_path).unwrap();
+    }
+
+    fn write_annual_leave_workbook(path: &Path, sheet_name: &str) {
+        let mut workbook = Workbook::new();
+        let sheet = workbook.add_worksheet();
+        sheet.set_name(sheet_name).unwrap();
+        sheet.write_string(0, 0, "年假信息").unwrap();
+        sheet.write_string(1, 0, "统计截止当前月").unwrap();
+        for (column, header) in [
+            "工号",
+            "姓名",
+            "公司",
+            "本年总额",
+            "已使用",
+            "冻结",
+            "待生效",
+            "其他",
+            "调整",
+            "截止当前月剩余（小时）",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            sheet.write_string(2, column as u16, header).unwrap();
+        }
+        sheet.write_string(3, 0, "24154").unwrap();
+        sheet.write_string(3, 1, "秦红").unwrap();
+        sheet.write_string(3, 2, "江苏福拉特").unwrap();
+        sheet.write_number(3, 9, 10.5).unwrap();
+        workbook.save(path).unwrap();
     }
 }

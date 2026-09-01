@@ -9,11 +9,13 @@ import {
   FolderOpen,
   Settings,
   Trash2,
-  Upload
+  Upload,
+  UserPlus
 } from "lucide-react";
 import { Markdown } from "@tanstack/markdown/react";
 
 import { Button } from "@/components/ui/button";
+import { EmployeePickerDialog } from "@/components/employee-picker-dialog";
 import { Input } from "@/components/ui/input";
 import {
   Dialog,
@@ -34,6 +36,7 @@ import currentAttendanceRules from "../../../docs/当前考勤规则.md?raw";
 import type {
   AttendanceSettings,
   DesktopSelection,
+  EmployeeIdentity,
   GenerateResponse,
   InspectResponse,
   SpecialPersonnelConfig,
@@ -135,6 +138,7 @@ export default function App() {
   const [settingsError, setSettingsError] = useState<string | null>(null);
   const [settingsNotice, setSettingsNotice] = useState<string | null>(null);
   const [addGroup, setAddGroup] = useState<SpecialPersonnelGroup>("punchMealNoOvertime");
+  const [employeePickerOpen, setEmployeePickerOpen] = useState(false);
   const [currentEmployeeIndex, setCurrentEmployeeIndex] = useState<string | undefined>();
   const [newStatutoryHolidayDate, setNewStatutoryHolidayDate] = useState("");
 
@@ -146,8 +150,7 @@ export default function App() {
       ]
     : [];
   const availableEmployees = (inspect?.employees ?? [])
-    .map((employee, index) => ({ employee, index: String(index) }))
-    .filter(({ employee }) => !configuredPeople.some((configured) =>
+    .filter((employee) => !configuredPeople.some((configured) =>
       configured.employeeNo && employee.employeeNo
         ? configured.employeeNo === employee.employeeNo
         : configured.name === employee.name
@@ -155,6 +158,8 @@ export default function App() {
   const selectedEmployee = currentEmployeeIndex === undefined
     ? null
     : inspect?.employees[Number(currentEmployeeIndex)] ?? null;
+  const employeePickerTarget = SPECIAL_GROUPS.find((group) => group.key === addGroup)?.title
+    ?? "特殊人员";
 
   async function selectFile() {
     if (busy !== "idle") return;
@@ -208,6 +213,7 @@ export default function App() {
       const loaded = await window.attendanceDesktop.getSettings();
       setSettingsDraft(cloneSettings(loaded));
       setSettingsPage("home");
+      setEmployeePickerOpen(false);
       setCurrentEmployeeIndex(undefined);
       setNewStatutoryHolidayDate("");
       setSettingsOpen(true);
@@ -218,34 +224,47 @@ export default function App() {
     }
   }
 
-  function addConfiguredPerson() {
+  function addConfiguredPeople(employees: EmployeeIdentity[]) {
+    if (!settingsDraft || employees.length === 0) return;
+    const allPeople = [
+      ...SPECIAL_GROUPS.flatMap((group) => settingsDraft.specialPersonnel[group.key]),
+      ...settingsDraft.excludedPersonnel
+    ];
+    const people = employees
+      .map<SpecialPerson>((employee) => ({
+        employeeNo: employee.employeeNo.trim(),
+        name: employee.name.trim()
+      }))
+      .filter((person, index, selected) => {
+        const matches = (existing: SpecialPerson) => existing.employeeNo && person.employeeNo
+          ? existing.employeeNo === person.employeeNo
+          : existing.name === person.name;
+        return !allPeople.some(matches) && selected.findIndex(matches) === index;
+      });
+    if (people.length === 0) {
+      setSettingsError("所选人员已经配置");
+      return;
+    }
+    setSettingsDraft({
+      ...settingsDraft,
+      specialPersonnel: {
+        ...settingsDraft.specialPersonnel,
+        [addGroup]: [...settingsDraft.specialPersonnel[addGroup], ...people]
+      }
+    });
+    setSettingsError(null);
+    setSettingsNotice(`已添加 ${people.length} 人，保存后生效`);
+  }
+
+  function addExcludedPerson() {
     if (!settingsDraft || !selectedEmployee) return;
     const person: SpecialPerson = {
       employeeNo: selectedEmployee.employeeNo.trim(),
       name: selectedEmployee.name.trim()
     };
-    const allPeople = [
-      ...SPECIAL_GROUPS.flatMap((group) => settingsDraft.specialPersonnel[group.key]),
-      ...settingsDraft.excludedPersonnel
-    ];
-    const duplicate = allPeople.some((existing) =>
-      existing.employeeNo && person.employeeNo
-        ? existing.employeeNo === person.employeeNo
-        : existing.name === person.name
-    );
-    if (duplicate) {
-      setSettingsError(person.employeeNo ? `工号 ${person.employeeNo} 已经配置` : `${person.name} 已经配置`);
-      return;
-    }
-    setSettingsDraft(settingsPage === "excluded" ? {
+    setSettingsDraft({
       ...settingsDraft,
       excludedPersonnel: [...settingsDraft.excludedPersonnel, person]
-    } : {
-      ...settingsDraft,
-      specialPersonnel: {
-        ...settingsDraft.specialPersonnel,
-        [addGroup]: [...settingsDraft.specialPersonnel[addGroup], person]
-      }
     });
     setCurrentEmployeeIndex(undefined);
     setSettingsError(null);
@@ -444,7 +463,6 @@ export default function App() {
 
           {settingsPage === "home" ? <div className="settings-menu">
             <Button variant="ghost" className="settings-menu-button" type="button" onClick={() => {
-              setCurrentEmployeeIndex(undefined);
               setSettingsPage("special");
             }}>
               <strong>特殊人员</strong>
@@ -544,15 +562,25 @@ export default function App() {
                 <SelectTrigger aria-label="添加到特殊人员分组"><SelectValue /></SelectTrigger>
                 <SelectContent>{SPECIAL_GROUPS.map((group) => <SelectItem value={group.key} key={group.key}>{group.title}</SelectItem>)}</SelectContent>
               </Select> : null}
-              <Select value={currentEmployeeIndex} disabled={!inspect || availableEmployees.length === 0} onValueChange={setCurrentEmployeeIndex}>
-                <SelectTrigger aria-label="从当前报表选择员工"><SelectValue placeholder={!inspect ? "选择报表后可添加人员" : availableEmployees.length ? "选择人员" : "当前报表人员均已配置"} /></SelectTrigger>
-                <SelectContent>
-                {availableEmployees.map(({ employee, index }) => (
-                  <SelectItem value={index} key={`${employee.employeeNo}:${employee.name}`}>{employee.name} · {employee.employeeNo || "无工号"}</SelectItem>
-                ))}
-                </SelectContent>
-              </Select>
-              <Button type="button" disabled={!selectedEmployee} onClick={addConfiguredPerson}>添加</Button>
+              {settingsPage === "special" ? <Button
+                className="open-employee-picker"
+                type="button"
+                disabled={!inspect || availableEmployees.length === 0}
+                onClick={() => setEmployeePickerOpen(true)}
+              >
+                <UserPlus size={16} />
+                <span>{!inspect ? "请先选择考勤报表" : availableEmployees.length ? `选择人员（${availableEmployees.length}）` : "当前报表人员均已配置"}</span>
+              </Button> : <>
+                <Select value={currentEmployeeIndex} disabled={!inspect || availableEmployees.length === 0} onValueChange={setCurrentEmployeeIndex}>
+                  <SelectTrigger aria-label="从当前报表选择员工"><SelectValue placeholder={!inspect ? "选择报表后可添加人员" : availableEmployees.length ? "选择人员" : "当前报表人员均已配置"} /></SelectTrigger>
+                  <SelectContent>
+                  {availableEmployees.map((employee, index) => (
+                    <SelectItem value={String((inspect?.employees ?? []).indexOf(employee))} key={`${employee.employeeNo}:${employee.name}:${index}`}>{employee.name} · {employee.employeeNo || "无工号"}</SelectItem>
+                  ))}
+                  </SelectContent>
+                </Select>
+                <Button type="button" disabled={!selectedEmployee} onClick={addExcludedPerson}>添加</Button>
+              </>}
             </div>
           </div> : null}
 
@@ -565,6 +593,14 @@ export default function App() {
         </div>
         </DialogContent>
       </Dialog>
+
+      <EmployeePickerDialog
+        employees={availableEmployees}
+        open={employeePickerOpen}
+        targetLabel={employeePickerTarget}
+        onOpenChange={setEmployeePickerOpen}
+        onConfirm={addConfiguredPeople}
+      />
 
       <Dialog open={resultOpen} onOpenChange={setResultOpen}>
         <DialogContent>

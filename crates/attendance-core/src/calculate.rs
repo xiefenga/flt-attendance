@@ -353,6 +353,7 @@ pub fn calculate_attendance_with_config(
             .count() as f64;
         let childcare_leave_hours = unique_process_amount(&monthly.daily_results, "育儿假");
         let prenatal_leave_hours = unique_process_amount(&monthly.daily_results, "产检假");
+        let annual_leave_hours = unique_process_amount(&monthly.daily_results, "年假");
         let absent_days: f64 = active_daily_records
             .iter()
             .map(|daily| daily.absent_days)
@@ -366,7 +367,7 @@ pub fn calculate_attendance_with_config(
         let leave_hours = monthly.personal_leave_hours
             + monthly.compensatory_leave_hours
             + monthly.sick_leave_hours
-            + monthly.annual_leave_hours
+            + annual_leave_hours
             + monthly.breastfeeding_leave_hours
             + marriage_leave_hours
             + maternity_leave_hours
@@ -459,7 +460,7 @@ pub fn calculate_attendance_with_config(
             &company,
         ) {
             AnnualLeaveMatch::Matched(balance_before_month) => {
-                let balance = balance_before_month - monthly.annual_leave_hours;
+                let balance = balance_before_month - annual_leave_hours;
                 Some(if balance.abs() < 0.001 { 0.0 } else { balance })
             }
             AnnualLeaveMatch::Missing => {
@@ -483,7 +484,7 @@ pub fn calculate_attendance_with_config(
             holiday_overtime_hours,
             expected_attendance_hours,
             actual_attendance_hours: Some(normal_attendance_hours + overtime_hours),
-            annual_leave_hours: monthly.annual_leave_hours,
+            annual_leave_hours,
             annual_leave_balance_hours,
             sick_leave_hours: monthly.sick_leave_hours,
             personal_leave_hours: monthly.personal_leave_hours,
@@ -529,14 +530,14 @@ pub fn calculate_attendance_with_config(
     if dataset.annual_leave_records.is_empty() {
         warnings.insert(
             0,
-            "年假剩余未计算：未读取到“年假信息”工作表或其中没有有效余额。".to_owned(),
+            "年假剩余未计算：未读取到“年假明细”工作表或其中没有有效余额。".to_owned(),
         );
     } else {
         if annual_leave_ambiguous_employees > 0 {
             warnings.insert(
                 0,
                 format!(
-                    "年假余额匹配不唯一 {annual_leave_ambiguous_employees} 人：请在“年假信息”中补充工号，结果留空。"
+                    "年假余额匹配不唯一 {annual_leave_ambiguous_employees} 人：请在“年假明细”中补充工号，结果留空。"
                 ),
             );
         }
@@ -544,7 +545,7 @@ pub fn calculate_attendance_with_config(
             warnings.insert(
                 0,
                 format!(
-                    "年假余额未匹配 {annual_leave_missing_employees} 人：在“年假信息”中未找到对应工号或姓名，结果留空。"
+                    "年假余额未匹配 {annual_leave_missing_employees} 人：在“年假明细”中未找到对应工号或姓名，结果留空。"
                 ),
             );
         }
@@ -1648,7 +1649,8 @@ mod tests {
     #[test]
     fn annual_leave_balance_subtracts_current_month_usage() {
         let mut monthly = empty_monthly_record();
-        monthly.annual_leave_hours = 3.5;
+        monthly.annual_leave_hours = 99.0;
+        monthly.daily_results = vec!["年假07-01 13:00到07-01 16:30 3.5小时".to_owned()];
         let report = calculate_attendance(&AttendanceDataset {
             period: crate::model::AttendancePeriod {
                 year: 2026,
@@ -1670,6 +1672,34 @@ mod tests {
             report.summary_rows[0].annual_leave_balance_hours,
             Some(29.0)
         );
+        assert_eq!(report.summary_rows[0].annual_leave_hours, 3.5);
+        assert_eq!(report.detail_rows[0].days[0].attendance, "N3.5");
+    }
+
+    #[test]
+    fn annual_leave_summary_deduplicates_multi_day_daily_processes() {
+        let mut monthly = empty_monthly_record();
+        monthly.daily_results = vec![
+            "年假07-01 08:30到07-02 17:30 16小时".to_owned(),
+            "年假07-01 08:30到07-02 17:30 16小时".to_owned(),
+            "年假07-03 08:30到07-03 09:00 0.5小时".to_owned(),
+        ];
+        let report = calculate_attendance(&AttendanceDataset {
+            period: crate::model::AttendancePeriod {
+                year: 2026,
+                month: 7,
+            },
+            monthly: vec![monthly],
+            daily: vec![],
+            invalid_punches: vec![],
+            employment_records: vec![],
+            annual_leave_records: vec![],
+        });
+
+        assert_eq!(report.summary_rows[0].annual_leave_hours, 16.5);
+        assert_eq!(report.detail_rows[0].days[0].attendance, "N8");
+        assert_eq!(report.detail_rows[0].days[1].attendance, "N8");
+        assert_eq!(report.detail_rows[0].days[2].attendance, "N0.5");
     }
 
     #[test]
