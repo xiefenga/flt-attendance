@@ -5,6 +5,7 @@ import type { AttendanceDesktopApi } from "../shared/ipc-contract";
 const attendanceDesktop: AttendanceDesktopApi = {
   selectInput: () => ipcRenderer.invoke("attendance:select-input"),
   selectOutput: (defaultName) => ipcRenderer.invoke("attendance:select-output", defaultName),
+  downloadInputTemplate: () => ipcRenderer.invoke("attendance:download-input-template"),
   inspect: (inputPath) => ipcRenderer.invoke("attendance:inspect", inputPath),
   getSettings: () => ipcRenderer.invoke("attendance:get-settings"),
   importSettings: () => ipcRenderer.invoke("attendance:import-settings"),

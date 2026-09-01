@@ -84,6 +84,12 @@ function historyTemplatePath(): string {
     : path.resolve(__dirname, "../../examples/templates/考勤统计表模板.xlsx");
 }
 
+function inputTemplatePath(): string {
+  return app.isPackaged
+    ? path.join(process.resourcesPath, "钉钉考勤输入模板.xlsx")
+    : path.resolve(__dirname, "../../examples/templates/钉钉考勤输入模板.xlsx");
+}
+
 function appIconPath(): string {
   return app.isPackaged
     ? path.join(process.resourcesPath, "icons", "app-icon.png")
@@ -273,6 +279,26 @@ function registerIpc(): void {
           filters: [{ name: "Excel 工作簿", extensions: ["xlsx"] }]
         });
     return result.canceled ? null : result.filePath;
+  });
+
+  ipcMain.handle("attendance:download-input-template", async () => {
+    const result = mainWindow
+      ? await dialog.showSaveDialog(mainWindow, {
+          title: "下载钉钉考勤输入模板",
+          defaultPath: "钉钉考勤输入模板.xlsx",
+          filters: [{ name: "Excel 工作簿", extensions: ["xlsx"] }]
+        })
+      : await dialog.showSaveDialog({
+          title: "下载钉钉考勤输入模板",
+          defaultPath: "钉钉考勤输入模板.xlsx",
+          filters: [{ name: "Excel 工作簿", extensions: ["xlsx"] }]
+        });
+    if (result.canceled || !result.filePath) return false;
+    const source = inputTemplatePath();
+    if (path.resolve(source) !== path.resolve(result.filePath)) {
+      await fs.promises.copyFile(source, result.filePath);
+    }
+    return true;
   });
 
   ipcMain.handle("attendance:inspect", async (_event, inputPath: string): Promise<InspectResponse> => {

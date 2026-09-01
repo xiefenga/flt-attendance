@@ -12,7 +12,8 @@ module.exports = {
     extraResource: [
       path.join(projectRoot, "resources", "native"),
       path.join(projectRoot, "resources", "icons"),
-      path.join(projectRoot, "examples", "templates", "考勤统计表模板.xlsx")
+      path.join(projectRoot, "examples", "templates", "考勤统计表模板.xlsx"),
+      path.join(projectRoot, "examples", "templates", "钉钉考勤输入模板.xlsx")
     ],
     ignore: [/^\/(?!dist(?:\/|$)|package\.json$).+/]
   },

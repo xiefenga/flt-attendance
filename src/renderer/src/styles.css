@@ -100,7 +100,7 @@ main { width: min(100%, 920px); height: calc(100% - 44px); margin: 0 auto; paddi
 .intro { margin-bottom: 24px; display: flex; align-items: center; justify-content: space-between; gap: 16px; }
 .intro h1 { margin: 0; font-size: clamp(28px, 3.4vw, 32px); line-height: 1.2; letter-spacing: -.025em; font-weight: 720; }
 .intro-actions { display: flex; align-items: center; gap: 8px; }
-.rules-button { min-height: 40px; padding: 0 14px; }
+.rules-button, .template-button { min-height: 40px; padding: 0 14px; }
 .settings-button { width: 40px; min-width: 40px; height: 40px; min-height: 40px; padding: 0; display: grid; flex: 0 0 40px; place-items: center; gap: 0; }
 .settings-icon { width: 20px; height: 20px; display: block; flex: none; }
 .settings-icon svg { width: 20px !important; height: 20px !important; display: block; overflow: visible; }

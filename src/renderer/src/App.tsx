@@ -6,6 +6,7 @@ import {
   CircleCheck,
   ChevronLeft,
   ChevronRight,
+  Download,
   FolderOpen,
   Settings,
   Trash2,
@@ -164,6 +165,9 @@ export default function App() {
   const [result, setResult] = useState<GenerateResponse | null>(null);
   const [resultOpen, setResultOpen] = useState(false);
   const [rulesOpen, setRulesOpen] = useState(false);
+  const [templateBusy, setTemplateBusy] = useState(false);
+  const [templateDownloaded, setTemplateDownloaded] = useState(false);
+  const [templateError, setTemplateError] = useState<string | null>(null);
   const [revealed, setRevealed] = useState(false);
   const [settingsDraft, setSettingsDraft] = useState<AttendanceSettings | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -198,6 +202,7 @@ export default function App() {
   async function selectFile() {
     if (busy !== "idle") return;
     try {
+      setTemplateError(null);
       const selected = await window.attendanceDesktop.selectInput();
       if (!selected) return;
       setFile(selected);
@@ -218,6 +223,7 @@ export default function App() {
     if (!file || !inspect || !ready) return;
     const defaultName = `考勤统计表_${inspect.year}${String(inspect.month).padStart(2, "0")}.xlsx`;
     try {
+      setTemplateError(null);
       const outputPath = await window.attendanceDesktop.selectOutput(defaultName);
       if (!outputPath) return;
       setBusy("generating");
@@ -230,6 +236,21 @@ export default function App() {
       setError(readableError(caught));
     } finally {
       setBusy("idle");
+    }
+  }
+
+  async function downloadInputTemplate() {
+    if (templateBusy) return;
+    setTemplateBusy(true);
+    setTemplateDownloaded(false);
+    setTemplateError(null);
+    try {
+      const downloaded = await window.attendanceDesktop.downloadInputTemplate();
+      if (downloaded) setTemplateDownloaded(true);
+    } catch (caught) {
+      setTemplateError(readableError(caught));
+    } finally {
+      setTemplateBusy(false);
     }
   }
 
@@ -401,6 +422,9 @@ export default function App() {
           <div className="intro">
             <h1>考勤统计</h1>
             <div className="intro-actions">
+              <Button className="template-button" type="button" disabled={templateBusy || busy !== "idle"} onClick={() => void downloadInputTemplate()}>
+                <Download size={17} strokeWidth={1.8} /><span>{templateBusy ? "正在保存…" : templateDownloaded ? "输入模板已保存" : "下载输入模板"}</span>
+              </Button>
               <Button className="rules-button" type="button" onClick={() => setRulesOpen(true)}>
                 <BookOpenText size={17} strokeWidth={1.8} /><span>考勤规则</span>
               </Button>
@@ -449,6 +473,7 @@ export default function App() {
 
           <div className="message-slot" aria-live="assertive">
             {error ? <div className="message"><span>!</span><div><strong>文件处理失败</strong><p>{error}</p></div></div> : null}
+            {!error && templateError ? <div className="message"><span>!</span><div><strong>模板下载失败</strong><p>{templateError}</p></div></div> : null}
           </div>
 
           <div className="action-zone">

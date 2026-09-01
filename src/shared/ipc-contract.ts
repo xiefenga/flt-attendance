@@ -67,6 +67,7 @@ export interface GenerateResponse {
 export interface AttendanceDesktopApi {
   selectInput(): Promise<DesktopSelection | null>;
   selectOutput(defaultName: string): Promise<string | null>;
+  downloadInputTemplate(): Promise<boolean>;
   inspect(inputPath: string): Promise<InspectResponse>;
   getSettings(): Promise<AttendanceSettings>;
   importSettings(): Promise<AttendanceSettings | null>;
