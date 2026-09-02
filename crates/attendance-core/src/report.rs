@@ -353,10 +353,8 @@ fn write_detail_totals(
     body: &Format,
     pending: &Format,
 ) -> Result<(), XlsxError> {
-    for offset in 0..DETAIL_SUMMARY_HEADERS.len() as u16 {
-        sheet.write_blank(attendance_row, start + offset, body)?;
-        sheet.write_blank(overtime_row, start + offset, body)?;
-    }
+    sheet.write_blank(attendance_row, start, body)?;
+    sheet.write_blank(overtime_row, start, body)?;
     sheet.write_number_with_format(
         attendance_row,
         start,
@@ -364,67 +362,76 @@ fn write_detail_totals(
         body,
     )?;
     sheet.write_number_with_format(overtime_row, start, row.summary.overtime_meal_count, body)?;
-    write_optional_number(
+    write_merged_optional_number(
         sheet,
         attendance_row,
+        overtime_row,
         start + 1,
         row.summary.meal_allowance_count,
         body,
         pending,
     )?;
-    write_number_or_blank(
+    write_merged_number_or_blank(
         sheet,
         attendance_row,
+        overtime_row,
         start + 2,
         row.summary.travel_days,
         body,
     )?;
-    write_number_or_blank(
+    write_merged_number_or_blank(
         sheet,
+        attendance_row,
         overtime_row,
         start + 3,
         row.summary.weekday_overtime_hours,
         body,
     )?;
-    write_number_or_blank(
+    write_merged_number_or_blank(
         sheet,
+        attendance_row,
         overtime_row,
         start + 4,
         row.summary.weekend_overtime_hours,
         body,
     )?;
-    write_number_or_blank(
+    write_merged_number_or_blank(
         sheet,
+        attendance_row,
         overtime_row,
         start + 5,
         row.summary.holiday_overtime_hours,
         body,
     )?;
-    write_number_or_blank(
+    write_merged_number_or_blank(
         sheet,
         attendance_row,
+        overtime_row,
         start + 6,
         row.summary.expected_attendance_hours,
         body,
     )?;
-    write_optional_number(
+    write_merged_optional_number(
         sheet,
         attendance_row,
+        overtime_row,
         start + 7,
         row.summary.actual_attendance_hours,
         body,
         pending,
     )?;
-    write_number_or_blank(
+    write_merged_number_or_blank(
         sheet,
         attendance_row,
+        overtime_row,
         start + 8,
         row.summary.annual_leave_hours,
         body,
     )?;
-    write_optional_number(
+    write_merged_optional_number(
         sheet,
         attendance_row,
+        overtime_row,
         start + 9,
         row.summary.annual_leave_balance_hours,
         body,
@@ -443,9 +450,10 @@ fn write_detail_totals(
     .into_iter()
     .enumerate()
     {
-        write_number_or_blank(
+        write_merged_number_or_blank(
             sheet,
             attendance_row,
+            overtime_row,
             start + 10 + offset as u16,
             value,
             body,
@@ -576,6 +584,42 @@ fn write_number_or_blank(
         sheet.write_blank(row, column, format)?;
     } else {
         sheet.write_number_with_format(row, column, value, format)?;
+    }
+    Ok(())
+}
+
+fn write_merged_number_or_blank(
+    sheet: &mut Worksheet,
+    first_row: u32,
+    last_row: u32,
+    column: u16,
+    value: f64,
+    format: &Format,
+) -> Result<(), XlsxError> {
+    sheet.merge_range(first_row, column, last_row, column, "", format)?;
+    if value != 0.0 {
+        sheet.write_number_with_format(first_row, column, value, format)?;
+    }
+    Ok(())
+}
+
+fn write_merged_optional_number(
+    sheet: &mut Worksheet,
+    first_row: u32,
+    last_row: u32,
+    column: u16,
+    value: Option<f64>,
+    value_format: &Format,
+    blank_format: &Format,
+) -> Result<(), XlsxError> {
+    let format = if value.is_some() {
+        value_format
+    } else {
+        blank_format
+    };
+    sheet.merge_range(first_row, column, last_row, column, "", format)?;
+    if let Some(value) = value {
+        sheet.write_number_with_format(first_row, column, value, format)?;
     }
     Ok(())
 }
