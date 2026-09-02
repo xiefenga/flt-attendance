@@ -16,6 +16,7 @@ pub use dingtalk::{
 };
 pub use model::{
     AnnualLeaveRecord, AttendanceDataset, AttendancePeriod, CalendarDate, DailyRecord,
-    EmploymentRecord, InvalidPunch, MonthlyRecord, PunchKind, PunchSlot,
+    EmploymentRecord, InvalidPunch, MonthlyLeaveSummaryPresence, MonthlyRecord, PunchKind,
+    PunchSlot,
 };
 pub use report::{generate_attendance_report, generate_report_skeleton};

@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap};
 
 use serde::Serialize;
 
@@ -261,6 +261,7 @@ pub fn calculate_attendance_with_config(
     let mut unclassified_late_events = 0_u32;
     let mut annual_leave_missing_employees = 0_usize;
     let mut annual_leave_ambiguous_employees = 0_usize;
+    let mut leave_fallback_categories = BTreeMap::<&'static str, usize>::new();
     let has_statutory_holiday_override = config.has_statutory_holiday_override(dataset.period.year);
     let mut statutory_holiday_override_missing_daily_data = false;
 
@@ -354,24 +355,124 @@ pub fn calculate_attendance_with_config(
                     )
             })
             .count() as f64;
-        let childcare_leave_hours = unique_process_amount(&monthly.daily_results, "育儿假");
-        let prenatal_leave_hours = unique_process_amount(&monthly.daily_results, "产检假");
-        let annual_leave_hours = unique_process_amount(&monthly.daily_results, "年假");
+        let process_hours = |process_name| {
+            unique_process_amount_for_month(
+                &monthly.daily_results,
+                process_name,
+                daily_records,
+                dataset.period.year,
+                dataset.period.month,
+                standard_daily_hours,
+                uses_six_day_schedule,
+                employment,
+            )
+        };
+        let childcare_leave_hours = process_hours("育儿假");
+        let prenatal_leave_hours = process_hours("产检假");
+        let annual_leave_hours = process_hours("年假");
         let absent_days: f64 = active_daily_records
             .iter()
             .map(|daily| daily.absent_days)
             .sum();
-        let marriage_leave_hours = monthly.marriage_leave_days * standard_daily_hours;
-        let maternity_leave_hours =
-            (monthly.maternity_leave_days + monthly.paternity_leave_days) * standard_daily_hours;
-        let bereavement_leave_hours = monthly.bereavement_leave_days * standard_daily_hours;
-        let menstrual_leave_hours = monthly.menstrual_leave_days * standard_daily_hours;
+        let personal_process_hours = process_hours("事假");
+        let compensatory_process_hours = process_hours("调休");
+        let sick_process_hours = process_hours("病假");
+        let breastfeeding_process_hours = process_hours("哺乳假");
+        let marriage_process_hours = process_hours("婚假");
+        let maternity_process_hours = process_hours("产假");
+        let paternity_process_hours = process_hours("陪产假");
+        let bereavement_process_hours = process_hours("丧假");
+        let menstrual_process_hours = process_hours("例假");
+        let personal_leave_hours = summary_or_process_hours(
+            monthly.leave_summary_present.personal,
+            monthly.personal_leave_hours,
+            personal_process_hours,
+        );
+        let compensatory_leave_hours = summary_or_process_hours(
+            monthly.leave_summary_present.compensatory,
+            monthly.compensatory_leave_hours,
+            compensatory_process_hours,
+        );
+        let sick_leave_hours = summary_or_process_hours(
+            monthly.leave_summary_present.sick,
+            monthly.sick_leave_hours,
+            sick_process_hours,
+        );
+        let breastfeeding_leave_hours = summary_or_process_hours(
+            monthly.leave_summary_present.breastfeeding,
+            monthly.breastfeeding_leave_hours,
+            breastfeeding_process_hours,
+        );
+        let marriage_leave_hours = summary_or_process_hours(
+            monthly.leave_summary_present.marriage,
+            monthly.marriage_leave_days * standard_daily_hours,
+            marriage_process_hours,
+        );
+        let maternity_leave_hours = summary_or_process_hours(
+            monthly.leave_summary_present.maternity,
+            monthly.maternity_leave_days * standard_daily_hours,
+            maternity_process_hours,
+        ) + summary_or_process_hours(
+            monthly.leave_summary_present.paternity,
+            monthly.paternity_leave_days * standard_daily_hours,
+            paternity_process_hours,
+        );
+        let bereavement_leave_hours = summary_or_process_hours(
+            monthly.leave_summary_present.bereavement,
+            monthly.bereavement_leave_days * standard_daily_hours,
+            bereavement_process_hours,
+        );
+        let menstrual_leave_hours = summary_or_process_hours(
+            monthly.leave_summary_present.menstrual,
+            monthly.menstrual_leave_days * standard_daily_hours,
+            menstrual_process_hours,
+        );
+        for (label, used_fallback) in [
+            (
+                "事假",
+                !monthly.leave_summary_present.personal && personal_process_hours > 0.001,
+            ),
+            (
+                "调休",
+                !monthly.leave_summary_present.compensatory && compensatory_process_hours > 0.001,
+            ),
+            (
+                "病假",
+                !monthly.leave_summary_present.sick && sick_process_hours > 0.001,
+            ),
+            (
+                "哺乳假",
+                !monthly.leave_summary_present.breastfeeding && breastfeeding_process_hours > 0.001,
+            ),
+            (
+                "婚假",
+                !monthly.leave_summary_present.marriage && marriage_process_hours > 0.001,
+            ),
+            (
+                "产假/陪产假",
+                (!monthly.leave_summary_present.maternity && maternity_process_hours > 0.001)
+                    || (!monthly.leave_summary_present.paternity
+                        && paternity_process_hours > 0.001),
+            ),
+            (
+                "丧假",
+                !monthly.leave_summary_present.bereavement && bereavement_process_hours > 0.001,
+            ),
+            (
+                "例假",
+                !monthly.leave_summary_present.menstrual && menstrual_process_hours > 0.001,
+            ),
+        ] {
+            if used_fallback {
+                *leave_fallback_categories.entry(label).or_default() += 1;
+            }
+        }
         let absent_hours = absent_days * standard_daily_hours;
-        let leave_hours = monthly.personal_leave_hours
-            + monthly.compensatory_leave_hours
-            + monthly.sick_leave_hours
+        let leave_hours = personal_leave_hours
+            + compensatory_leave_hours
+            + sick_leave_hours
             + annual_leave_hours
-            + monthly.breastfeeding_leave_hours
+            + breastfeeding_leave_hours
             + marriage_leave_hours
             + maternity_leave_hours
             + bereavement_leave_hours
@@ -396,6 +497,8 @@ pub fn calculate_attendance_with_config(
             dataset.period.year,
             dataset.period.month,
             uses_flexible_arrival_shift,
+            standard_daily_hours,
+            uses_six_day_schedule,
             employment,
         );
         let has_daily_overtime = days.iter().any(|day| day.overtime_hours > 0.0);
@@ -499,9 +602,9 @@ pub fn calculate_attendance_with_config(
             actual_attendance_hours: Some(normal_attendance_hours + overtime_hours),
             annual_leave_hours,
             annual_leave_balance_hours,
-            sick_leave_hours: monthly.sick_leave_hours,
-            personal_leave_hours: monthly.personal_leave_hours,
-            breastfeeding_leave_hours: monthly.breastfeeding_leave_hours,
+            sick_leave_hours,
+            personal_leave_hours,
+            breastfeeding_leave_hours,
             marriage_leave_hours,
             maternity_leave_hours,
             bereavement_leave_hours,
@@ -540,6 +643,17 @@ pub fn calculate_attendance_with_config(
         "出差天数：按月度汇总中的出差日期计。".to_owned(),
         "不在范围内打卡：按原始记录中的“当前不在可打卡的时间范围”计。".to_owned(),
     ];
+    if !leave_fallback_categories.is_empty() {
+        let recovered = leave_fallback_categories
+            .iter()
+            .map(|(label, employees)| format!("{label}{employees}人"))
+            .collect::<Vec<_>>()
+            .join("、");
+        warnings.insert(
+            0,
+            format!("月度请假汇总为空，已从逐日审批流程回退统计：{recovered}。"),
+        );
+    }
     if dataset.annual_leave_records.is_empty() {
         warnings.insert(
             0,
@@ -950,6 +1064,8 @@ fn build_daily_attendance(
     year: u16,
     month: u8,
     uses_flexible_arrival_shift: bool,
+    standard_daily_hours: f64,
+    uses_six_day_schedule: bool,
     employment: Option<&EmploymentRecord>,
 ) -> Vec<DailyAttendance> {
     let day_count = days_in_month(year, month);
@@ -1031,18 +1147,36 @@ fn build_daily_attendance(
         });
     }
 
+    let mut leave_hours_by_day = vec![BTreeMap::<&'static str, f64>::new(); day_count];
     for (process, indexes) in leave_processes {
         let Some(symbol) = leave_symbol(&process) else {
             continue;
         };
-        let amounts = allocate_process_hours(&process, indexes.len());
-        for (index, amount) in indexes.into_iter().zip(amounts) {
+        for (index, amount) in process_allocations_for_month(
+            &process,
+            &indexes,
+            daily_records,
+            year,
+            month,
+            standard_daily_hours,
+            uses_six_day_schedule,
+            employment,
+        ) {
+            *leave_hours_by_day[index].entry(symbol).or_default() += amount;
+        }
+    }
+    for (index, leave_hours) in leave_hours_by_day.into_iter().enumerate() {
+        if !leave_hours.is_empty() {
             let prefix = if cells[index].attendance == "C" {
                 "C"
             } else {
                 ""
             };
-            cells[index].attendance = format!("{prefix}{symbol}{}", format_hours(amount));
+            let marks = leave_hours
+                .into_iter()
+                .map(|(symbol, amount)| format!("{symbol}{}", format_hours(amount)))
+                .collect::<String>();
+            cells[index].attendance = format!("{prefix}{marks}");
         }
     }
 
@@ -1345,25 +1479,278 @@ fn is_scheduled_shift(shift: &str) -> bool {
     !shift.is_empty() && shift != "休息"
 }
 
-fn unique_process_amount(daily_results: &[String], process_name: &str) -> f64 {
-    let mut unique = HashSet::new();
-    for result in daily_results {
+fn summary_or_process_hours(summary_present: bool, summary: f64, process: f64) -> f64 {
+    if summary_present { summary } else { process }
+}
+
+fn unique_process_amount_for_month(
+    daily_results: &[String],
+    process_name: &str,
+    daily_records: &[&DailyRecord],
+    year: u16,
+    month: u8,
+    standard_daily_hours: f64,
+    uses_six_day_schedule: bool,
+    employment: Option<&EmploymentRecord>,
+) -> f64 {
+    let mut processes = BTreeMap::<String, Vec<usize>>::new();
+    for (day_index, result) in daily_results.iter().enumerate() {
         for part in result.split(',').map(str::trim) {
             if part.starts_with(process_name) {
-                unique.insert(part.to_owned());
+                processes
+                    .entry(part.to_owned())
+                    .or_default()
+                    .push(day_index);
             }
         }
     }
 
-    unique
-        .iter()
-        .map(|process| {
-            extract_amount_before(process, "天")
-                .map(|days| days * 8.0)
-                .or_else(|| extract_amount_before(process, "小时"))
-                .unwrap_or(0.0)
+    processes
+        .into_iter()
+        .map(|(process, indexes)| {
+            process_allocations_for_month(
+                &process,
+                &indexes,
+                daily_records,
+                year,
+                month,
+                standard_daily_hours,
+                uses_six_day_schedule,
+                employment,
+            )
+            .into_iter()
+            .map(|(_, hours)| hours)
+            .sum::<f64>()
         })
         .sum()
+}
+
+#[derive(Debug, Clone, Copy)]
+struct LeaveProcessSpan {
+    start: CalendarDate,
+    end: CalendarDate,
+    start_minutes: u32,
+    end_minutes: u32,
+    total_hours: f64,
+}
+
+fn process_allocations_for_month(
+    process: &str,
+    occurrence_indexes: &[usize],
+    daily_records: &[&DailyRecord],
+    year: u16,
+    month: u8,
+    standard_daily_hours: f64,
+    uses_six_day_schedule: bool,
+    employment: Option<&EmploymentRecord>,
+) -> Vec<(usize, f64)> {
+    let Some(span) = parse_leave_process_span(process, year, month, standard_daily_hours) else {
+        return occurrence_indexes
+            .iter()
+            .copied()
+            .zip(allocate_process_hours(process, occurrence_indexes.len()))
+            .collect();
+    };
+    let daily_by_day = daily_records
+        .iter()
+        .filter_map(|daily| day_from_date(&daily.date).map(|day| (day, *daily)))
+        .collect::<HashMap<_, _>>();
+    let mut allocations = Vec::<(CalendarDate, f64)>::new();
+    let mut date = span.start;
+    while date <= span.end {
+        if is_leave_workday(date, &daily_by_day, year, month, uses_six_day_schedule) {
+            let segments =
+                leave_work_segments(date, &daily_by_day, year, month, standard_daily_hours);
+            let lower = if date == span.start {
+                span.start_minutes
+            } else {
+                0
+            };
+            let upper = if date == span.end {
+                span.end_minutes
+            } else {
+                u32::MAX
+            };
+            let hours = segments
+                .iter()
+                .map(|(start, end)| {
+                    end.min(&upper).saturating_sub((*start).max(lower)) as f64 / 60.0
+                })
+                .sum::<f64>()
+                .min(standard_daily_hours);
+            if hours > 0.001 {
+                allocations.push((date, hours));
+            }
+        }
+        let Some(next) = next_calendar_date(date) else {
+            break;
+        };
+        date = next;
+    }
+
+    let allocated_hours = allocations.iter().map(|(_, hours)| *hours).sum::<f64>();
+    if allocated_hours > 0.001 && (allocated_hours - span.total_hours).abs() > 0.001 {
+        let ratio = span.total_hours / allocated_hours;
+        for (_, hours) in &mut allocations {
+            *hours *= ratio;
+        }
+    }
+
+    allocations
+        .into_iter()
+        .filter(|(date, _)| {
+            date.year == year
+                && date.month == month
+                && is_active_day(employment, date.year, date.month, date.day as usize)
+        })
+        .map(|(date, hours)| (date.day as usize - 1, hours))
+        .collect()
+}
+
+fn parse_leave_process_span(
+    process: &str,
+    report_year: u16,
+    report_month: u8,
+    standard_daily_hours: f64,
+) -> Option<LeaveProcessSpan> {
+    let month_days = extract_month_days(process);
+    let [(start_month, start_day), (end_month, end_day), ..] = month_days.as_slice() else {
+        return None;
+    };
+    let times = extract_clock_minutes(process);
+    let [start_minutes, end_minutes, ..] = times.as_slice() else {
+        return None;
+    };
+    let mut start_year = report_year;
+    if *start_month > report_month && *end_month <= report_month {
+        start_year = start_year.checked_sub(1)?;
+    }
+    let end_year = if end_month < start_month {
+        start_year.checked_add(1)?
+    } else {
+        start_year
+    };
+    let start = valid_calendar_date(start_year, *start_month, *start_day)?;
+    let end = valid_calendar_date(end_year, *end_month, *end_day)?;
+    if end < start {
+        return None;
+    }
+    let total_hours = extract_amount_before(process, "天")
+        .map(|days| days * standard_daily_hours)
+        .or_else(|| extract_amount_before(process, "小时"))?;
+    Some(LeaveProcessSpan {
+        start,
+        end,
+        start_minutes: *start_minutes,
+        end_minutes: *end_minutes,
+        total_hours,
+    })
+}
+
+fn extract_month_days(text: &str) -> Vec<(u8, u8)> {
+    let bytes = text.as_bytes();
+    let mut result = Vec::new();
+    let mut index = 0;
+    while index + 4 < bytes.len() {
+        if bytes[index].is_ascii_digit()
+            && bytes[index + 1].is_ascii_digit()
+            && bytes[index + 2] == b'-'
+            && bytes[index + 3].is_ascii_digit()
+            && bytes[index + 4].is_ascii_digit()
+        {
+            let month = (bytes[index] - b'0') * 10 + (bytes[index + 1] - b'0');
+            let day = (bytes[index + 3] - b'0') * 10 + (bytes[index + 4] - b'0');
+            if (1..=12).contains(&month) && (1..=31).contains(&day) {
+                result.push((month, day));
+            }
+            index += 5;
+        } else {
+            index += 1;
+        }
+    }
+    result
+}
+
+fn valid_calendar_date(year: u16, month: u8, day: u8) -> Option<CalendarDate> {
+    (day > 0 && day as usize <= days_in_month(year, month)).then_some(CalendarDate {
+        year,
+        month,
+        day,
+    })
+}
+
+fn next_calendar_date(date: CalendarDate) -> Option<CalendarDate> {
+    if (date.day as usize) < days_in_month(date.year, date.month) {
+        return Some(CalendarDate {
+            day: date.day + 1,
+            ..date
+        });
+    }
+    if date.month < 12 {
+        Some(CalendarDate {
+            year: date.year,
+            month: date.month + 1,
+            day: 1,
+        })
+    } else {
+        Some(CalendarDate {
+            year: date.year.checked_add(1)?,
+            month: 1,
+            day: 1,
+        })
+    }
+}
+
+fn is_leave_workday(
+    date: CalendarDate,
+    daily_by_day: &HashMap<usize, &DailyRecord>,
+    report_year: u16,
+    report_month: u8,
+    uses_six_day_schedule: bool,
+) -> bool {
+    if date.year == report_year
+        && date.month == report_month
+        && let Some(daily) = daily_by_day.get(&(date.day as usize))
+    {
+        if is_scheduled_shift(&daily.shift) {
+            return true;
+        }
+        if daily.shift == "休息" {
+            return false;
+        }
+    }
+    if uses_six_day_schedule {
+        holiday::is_six_day_workday(date.year, date.month, date.day)
+    } else {
+        holiday::is_workday(date.year, date.month, date.day)
+    }
+}
+
+fn leave_work_segments(
+    date: CalendarDate,
+    daily_by_day: &HashMap<usize, &DailyRecord>,
+    report_year: u16,
+    report_month: u8,
+    standard_daily_hours: f64,
+) -> Vec<(u32, u32)> {
+    let shift_times = (date.year == report_year && date.month == report_month)
+        .then(|| daily_by_day.get(&(date.day as usize)))
+        .flatten()
+        .map(|daily| extract_clock_minutes(&daily.shift))
+        .unwrap_or_default();
+    let (start, end) = match shift_times.as_slice() {
+        [start, end, ..] => (*start, *end),
+        _ if standard_daily_hours >= 7.0 => (8 * 60 + 30, 17 * 60 + 30),
+        _ => (
+            8 * 60 + 30,
+            8 * 60 + 30 + (standard_daily_hours * 60.0) as u32,
+        ),
+    };
+    if standard_daily_hours >= 7.0 && start < 12 * 60 && end > 13 * 60 {
+        vec![(start, 12 * 60), (13 * 60, end)]
+    } else {
+        vec![(start, end)]
+    }
 }
 
 fn extract_amount_before(text: &str, unit: &str) -> Option<f64> {
@@ -1531,6 +1918,7 @@ mod tests {
             menstrual_leave_days: 0.0,
             bereavement_leave_days: 0.0,
             breastfeeding_leave_hours: 0.0,
+            leave_summary_present: Default::default(),
             daily_results: vec![],
         }
     }
@@ -1554,6 +1942,94 @@ mod tests {
             extract_amount_before("育儿假07-01 3.5小时", "小时"),
             Some(3.5)
         );
+    }
+
+    #[test]
+    fn leave_process_fallback_clips_cross_month_hours_to_workdays() {
+        let sick = ["病假08-17 08:30到09-16 17:30 184小时".to_owned()];
+        assert_eq!(
+            unique_process_amount_for_month(&sick, "病假", &[], 2026, 8, 8.0, false, None,),
+            88.0
+        );
+
+        let personal = ["事假08-31 13:30到09-01 17:30 12小时".to_owned()];
+        assert_eq!(
+            unique_process_amount_for_month(&personal, "事假", &[], 2026, 8, 8.0, false, None,),
+            4.0
+        );
+
+        let marriage = ["婚假07-19 08:30到08-02 17:30 10天".to_owned()];
+        assert_eq!(
+            unique_process_amount_for_month(&marriage, "婚假", &[], 2026, 8, 8.0, false, None,),
+            0.0
+        );
+    }
+
+    #[test]
+    fn blank_monthly_leave_summary_falls_back_and_merges_same_day_processes() {
+        let mut monthly = empty_monthly_record();
+        monthly.daily_results = vec![String::new(); 31];
+        monthly.daily_results[2] =
+            "事假08-03 08:30到08-03 13:00 3.5小时,事假08-03 13:00到08-03 13:30 0.5小时".to_owned();
+        let daily = DailyRecord {
+            employee_key: "10001".to_owned(),
+            employee_no: "10001".to_owned(),
+            name: "测试员工".to_owned(),
+            date: "26-08-03 星期一".to_owned(),
+            shift: "默认班次 08:30-17:30".to_owned(),
+            overtime_hours: 0.0,
+            punch_slots: vec![],
+            late_count: 0.0,
+            severe_late_count: 0.0,
+            absent_late_days: 0.0,
+            early_count: 0.0,
+            missing_in_count: 0.0,
+            missing_out_count: 0.0,
+            absent_days: 0.0,
+        };
+        let report = calculate_attendance(&AttendanceDataset {
+            period: crate::model::AttendancePeriod {
+                year: 2026,
+                month: 8,
+            },
+            monthly: vec![monthly],
+            daily: vec![daily],
+            invalid_punches: vec![],
+            employment_records: vec![],
+            annual_leave_records: vec![],
+        });
+
+        assert_eq!(report.summary_rows[0].personal_leave_hours, 4.0);
+        assert_eq!(report.summary_rows[0].expected_attendance_hours, 8.0);
+        assert_eq!(report.summary_rows[0].actual_attendance_hours, Some(4.0));
+        assert_eq!(report.detail_rows[0].days[2].attendance, "O4");
+        assert!(
+            report
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("事假1人"))
+        );
+    }
+
+    #[test]
+    fn populated_monthly_leave_summary_remains_authoritative() {
+        let mut monthly = empty_monthly_record();
+        monthly.personal_leave_hours = 6.0;
+        monthly.leave_summary_present.personal = true;
+        monthly.daily_results = vec!["事假08-03 08:30到08-03 17:30 8小时".to_owned()];
+        let report = calculate_attendance(&AttendanceDataset {
+            period: crate::model::AttendancePeriod {
+                year: 2026,
+                month: 8,
+            },
+            monthly: vec![monthly],
+            daily: vec![],
+            invalid_punches: vec![],
+            employment_records: vec![],
+            annual_leave_records: vec![],
+        });
+
+        assert_eq!(report.summary_rows[0].personal_leave_hours, 6.0);
     }
 
     #[test]
@@ -1600,6 +2076,7 @@ mod tests {
             menstrual_leave_days: 0.0,
             bereavement_leave_days: 0.0,
             breastfeeding_leave_hours: 0.0,
+            leave_summary_present: Default::default(),
             daily_results: vec![String::new(); 3],
         };
         let daily = [1.49, 1.99, 2.49]
@@ -2155,6 +2632,7 @@ mod tests {
             menstrual_leave_days: 0.0,
             bereavement_leave_days: 0.0,
             breastfeeding_leave_hours: 0.0,
+            leave_summary_present: Default::default(),
             daily_results: vec![],
         };
         assert_eq!(
@@ -2211,6 +2689,7 @@ mod tests {
         assert!(is_active_day(Some(&employment), 2026, 7, 20));
 
         monthly.personal_leave_hours = 8.0;
+        monthly.leave_summary_present.personal = true;
         monthly.weekday_overtime_hours = 4.0;
         monthly.weekend_overtime_hours = 6.0;
         monthly.holiday_overtime_hours = 8.0;

@@ -7,7 +7,8 @@ use thiserror::Error;
 
 use crate::model::{
     AnnualLeaveRecord, AttendanceDataset, AttendancePeriod, CalendarDate, DailyRecord,
-    EmploymentRecord, InvalidPunch, MonthlyRecord, PunchKind, PunchSlot,
+    EmploymentRecord, InvalidPunch, MonthlyLeaveSummaryPresence, MonthlyRecord, PunchKind,
+    PunchSlot,
 };
 
 const REQUIRED_SHEETS: [&str; 4] = ["打卡时间", "原始记录", "月度汇总", "每日统计"];
@@ -450,6 +451,18 @@ fn parse_monthly(range: &calamine::Range<Data>) -> Vec<MonthlyRecord> {
                 menstrual_leave_days: cell_number(row.get(17)),
                 bereavement_leave_days: cell_number(row.get(18)),
                 breastfeeding_leave_hours: cell_number(row.get(19)),
+                leave_summary_present: MonthlyLeaveSummaryPresence {
+                    personal: cell_optional_number(row.get(10)).is_some(),
+                    compensatory: cell_optional_number(row.get(11)).is_some(),
+                    sick: cell_optional_number(row.get(12)).is_some(),
+                    annual: cell_optional_number(row.get(13)).is_some(),
+                    maternity: cell_optional_number(row.get(14)).is_some(),
+                    paternity: cell_optional_number(row.get(15)).is_some(),
+                    marriage: cell_optional_number(row.get(16)).is_some(),
+                    menstrual: cell_optional_number(row.get(17)).is_some(),
+                    bereavement: cell_optional_number(row.get(18)).is_some(),
+                    breastfeeding: cell_optional_number(row.get(19)).is_some(),
+                },
                 daily_results: row
                     .iter()
                     .skip(21)

@@ -40,6 +40,20 @@ pub struct AnnualLeaveRecord {
     pub balance_before_month_hours: f64,
 }
 
+#[derive(Debug, Clone, Copy, Default, Serialize, PartialEq, Eq)]
+pub struct MonthlyLeaveSummaryPresence {
+    pub personal: bool,
+    pub compensatory: bool,
+    pub sick: bool,
+    pub annual: bool,
+    pub maternity: bool,
+    pub paternity: bool,
+    pub marriage: bool,
+    pub menstrual: bool,
+    pub bereavement: bool,
+    pub breastfeeding: bool,
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct MonthlyRecord {
     pub employee_key: String,
@@ -63,6 +77,7 @@ pub struct MonthlyRecord {
     pub menstrual_leave_days: f64,
     pub bereavement_leave_days: f64,
     pub breastfeeding_leave_hours: f64,
+    pub leave_summary_present: MonthlyLeaveSummaryPresence,
     pub daily_results: Vec<String>,
 }
 
