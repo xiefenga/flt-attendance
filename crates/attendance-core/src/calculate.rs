@@ -629,7 +629,15 @@ pub fn calculate_attendance_with_config(
             &active_daily_records,
             &active_invalid_punches,
             &monthly.daily_results,
-            uses_flexible_arrival_shift,
+            ExceptionOptions {
+                uses_flexible_arrival_shift,
+                hire_day: employment
+                    .and_then(|record| record.hire_date)
+                    .filter(|date| {
+                        date.year == dataset.period.year && date.month == dataset.period.month
+                    })
+                    .map(|date| usize::from(date.day)),
+            },
         );
         unclassified_late_events += unclassified;
         if let Some(exception) = exception {
@@ -679,7 +687,7 @@ pub fn calculate_attendance_with_config(
     }
     if dataset.employment_records.is_empty() {
         warnings.push(
-            "未读取到入职名单/离职名单：无法按在职区间裁剪考勤，新员工入职当天餐补例外未应用。"
+            "未读取到入职名单/离职名单：无法按在职区间裁剪考勤，新员工入职当天餐补及上班卡异常豁免未应用。"
                 .to_owned(),
         );
     } else {
@@ -694,7 +702,7 @@ pub fn calculate_attendance_with_config(
             .filter(|record| record.termination_date.is_some())
             .count();
         warnings.push(format!(
-            "已读取入离职信息：{hires} 条入职、{terminations} 条离职；已按在职区间计算并应用入职当天餐补例外。"
+            "已读取入离职信息：{hires} 条入职、{terminations} 条离职；已按在职区间计算，并应用入职当天餐补及上班卡异常豁免。"
         ));
     }
     if unclassified_late_events > 0 {
@@ -1136,7 +1144,12 @@ fn build_daily_attendance(
             let hours = daily.map(|row| row.absent_days * 8.0).unwrap_or(8.0);
             attendance = format!("X{}", format_hours(hours));
         } else if let Some(daily) = daily {
-            let irregular = daily_irregular_mark(daily, result, uses_flexible_arrival_shift);
+            let irregular = daily_irregular_mark(
+                daily,
+                result,
+                uses_flexible_arrival_shift,
+                is_hire_day(employment, year, month, day_index + 1),
+            );
             if !irregular.is_empty() {
                 attendance.push_str(&irregular);
             }
@@ -1260,13 +1273,15 @@ fn daily_irregular_mark(
     daily: &DailyRecord,
     attendance_result: &str,
     uses_flexible_arrival_shift: bool,
+    ignores_in_exception: bool,
 ) -> String {
     if uses_flexible_arrival_shift {
         let mut marks = flexible_arrival_irregular_minutes(daily, attendance_result)
             .map(|minutes| format!("Z{minutes}"))
             .into_iter()
             .collect::<Vec<_>>();
-        if daily.missing_in_count > 0.0 || daily.missing_out_count > 0.0 {
+        if (!ignores_in_exception && daily.missing_in_count > 0.0) || daily.missing_out_count > 0.0
+        {
             marks.push("缺卡".to_owned());
         }
         return marks.join("");
@@ -1283,6 +1298,9 @@ fn daily_irregular_mark(
     });
     let mut marks = Vec::new();
     for slot in &daily.punch_slots {
+        if ignores_in_exception && slot.kind == PunchKind::In {
+            continue;
+        }
         let value = match (slot.kind, slot.result.as_str()) {
             (PunchKind::In, "迟到") => expected_start.and_then(|expected| {
                 parse_punch_minutes(&slot.time).map(|actual| ("D", actual.saturating_sub(expected)))
@@ -1296,7 +1314,7 @@ fn daily_irregular_mark(
             marks.push(format!("{symbol}{minutes}"));
         }
     }
-    if daily.missing_in_count > 0.0 || daily.missing_out_count > 0.0 {
+    if (!ignores_in_exception && daily.missing_in_count > 0.0) || daily.missing_out_count > 0.0 {
         marks.push("缺卡".to_owned());
     }
     marks.join("")
@@ -1329,6 +1347,12 @@ fn format_hours(value: f64) -> String {
     }
 }
 
+#[derive(Clone, Copy, Default)]
+struct ExceptionOptions {
+    uses_flexible_arrival_shift: bool,
+    hire_day: Option<usize>,
+}
+
 fn calculate_exceptions(
     employee_no: &str,
     name: &str,
@@ -1336,7 +1360,7 @@ fn calculate_exceptions(
     daily_records: &[&DailyRecord],
     invalid_punches: &[&crate::model::InvalidPunch],
     daily_results: &[String],
-    uses_flexible_arrival_shift: bool,
+    options: ExceptionOptions,
 ) -> (Option<ExceptionRow>, u32) {
     let mut row = ExceptionRow {
         employee_no: employee_no.to_owned(),
@@ -1355,7 +1379,15 @@ fn calculate_exceptions(
 
     for daily in daily_records {
         let date = display_date(&daily.date);
-        let missing_in = daily.missing_in_count.round().max(0.0) as u32;
+        let ignores_in_exception = options
+            .hire_day
+            .is_some_and(|hire_day| day_from_date(&daily.date) == Some(hire_day));
+        let reported_missing_in = daily.missing_in_count.round().max(0.0) as u32;
+        let missing_in = if ignores_in_exception {
+            0
+        } else {
+            reported_missing_in
+        };
         let missing_out = daily.missing_out_count.round().max(0.0) as u32;
         if missing_in > 0 {
             row.missing_in += missing_in;
@@ -1369,17 +1401,19 @@ fn calculate_exceptions(
         if daily.absent_days > 0.0
             && daily.punch_slots.is_empty()
             && is_scheduled_shift(&daily.shift)
-            && missing_in == 0
+            && reported_missing_in == 0
             && missing_out == 0
         {
             let missing_days = daily.absent_days.round().max(0.0) as u32;
-            row.missing_in += missing_days;
+            if !ignores_in_exception {
+                row.missing_in += missing_days;
+                row.notes.push(format!("{date}上班未签到"));
+            }
             row.missing_out += missing_days;
-            row.notes.push(format!("{date}上班未签到"));
             row.notes.push(format!("{date}下班未签退"));
         }
 
-        if uses_flexible_arrival_shift {
+        if options.uses_flexible_arrival_shift {
             let attendance_result = day_from_date(&daily.date)
                 .and_then(|day| daily_results.get(day.saturating_sub(1)))
                 .map(String::as_str)
@@ -1407,6 +1441,9 @@ fn calculate_exceptions(
         });
 
         for slot in &daily.punch_slots {
+            if ignores_in_exception && slot.kind == PunchKind::In {
+                continue;
+            }
             let minutes = match (slot.kind, slot.result.as_str()) {
                 (PunchKind::In, "迟到") => expected_start.and_then(|expected| {
                     parse_punch_minutes(&slot.time).map(|actual| actual.saturating_sub(expected))
@@ -2390,40 +2427,87 @@ mod tests {
     #[test]
     fn flexible_arrival_shift_uses_0830_boundary_without_late_mark() {
         let boundary = flexible_daily("08:30", "17:30");
-        assert_eq!(daily_irregular_mark(&boundary, "", true), "");
+        assert_eq!(daily_irregular_mark(&boundary, "", true, false), "");
         assert!(
-            calculate_exceptions("26333", "张一成", "", &[&boundary], &[], &[], true)
-                .0
-                .is_none()
+            calculate_exceptions(
+                "26333",
+                "张一成",
+                "",
+                &[&boundary],
+                &[],
+                &[],
+                ExceptionOptions {
+                    uses_flexible_arrival_shift: true,
+                    ..Default::default()
+                },
+            )
+            .0
+            .is_none()
         );
 
         let after_boundary = flexible_daily("08:31", "18:00");
-        assert_eq!(daily_irregular_mark(&after_boundary, "", true), "");
+        assert_eq!(daily_irregular_mark(&after_boundary, "", true, false), "");
         assert!(
-            calculate_exceptions("26333", "张一成", "", &[&after_boundary], &[], &[], true,)
-                .0
-                .is_none()
+            calculate_exceptions(
+                "26333",
+                "张一成",
+                "",
+                &[&after_boundary],
+                &[],
+                &[],
+                ExceptionOptions {
+                    uses_flexible_arrival_shift: true,
+                    ..Default::default()
+                },
+            )
+            .0
+            .is_none()
         );
     }
 
     #[test]
     fn flexible_arrival_shift_uses_1800_for_early_departure() {
         let daily = flexible_daily("08:31", "17:45");
-        assert_eq!(daily_irregular_mark(&daily, "", true), "Z15");
+        assert_eq!(daily_irregular_mark(&daily, "", true, false), "Z15");
 
-        let exception = calculate_exceptions("26333", "张一成", "", &[&daily], &[], &[], true)
-            .0
-            .expect("17:45 下班应按 18:00 计算早退");
+        let exception = calculate_exceptions(
+            "26333",
+            "张一成",
+            "",
+            &[&daily],
+            &[],
+            &[],
+            ExceptionOptions {
+                uses_flexible_arrival_shift: true,
+                ..Default::default()
+            },
+        )
+        .0
+        .expect("17:45 下班应按 18:00 计算早退");
         assert_eq!(exception.late_or_early_11_to_30, 1);
         assert_eq!(exception.late_or_early_under_10, 0);
         assert_eq!(exception.score, 2.0);
         assert_eq!(exception.notes, vec!["7.1早退15分钟"]);
-        assert_eq!(daily_irregular_mark(&daily, "年假07-01 8小时", true), "");
+        assert_eq!(
+            daily_irregular_mark(&daily, "年假07-01 8小时", true, false),
+            ""
+        );
         let leave_results = vec!["年假07-01 8小时".to_owned()];
         assert!(
-            calculate_exceptions("26333", "张一成", "", &[&daily], &[], &leave_results, true,)
-                .0
-                .is_none()
+            calculate_exceptions(
+                "26333",
+                "张一成",
+                "",
+                &[&daily],
+                &[],
+                &leave_results,
+                ExceptionOptions {
+                    uses_flexible_arrival_shift: true,
+                    ..Default::default()
+                },
+            )
+            .0
+            .is_none()
         );
     }
 
@@ -2443,7 +2527,7 @@ mod tests {
             &[&first, &second],
             &[],
             &[],
-            false,
+            ExceptionOptions::default(),
         );
         assert!(first_two.0.is_none());
 
@@ -2454,7 +2538,7 @@ mod tests {
             &[&first, &second, &third],
             &[],
             &[],
-            false,
+            ExceptionOptions::default(),
         )
         .0
         .expect("第三次 10 分钟内迟到应计入异常");
@@ -2477,7 +2561,7 @@ mod tests {
             &[&first, &second],
             &[],
             &[],
-            false,
+            ExceptionOptions::default(),
         )
         .0
         .expect("人事行政部不享受两次豁免");
@@ -2493,14 +2577,97 @@ mod tests {
         daily.late_count = 0.0;
         daily.absent_days = 1.0;
 
-        let exception =
-            calculate_exceptions("10001", "测试员工", "研发部", &[&daily], &[], &[], false)
-                .0
-                .expect("整天无打卡应拆成未签到和未签退");
+        let exception = calculate_exceptions(
+            "10001",
+            "测试员工",
+            "研发部",
+            &[&daily],
+            &[],
+            &[],
+            ExceptionOptions::default(),
+        )
+        .0
+        .expect("整天无打卡应拆成未签到和未签退");
         assert_eq!(exception.missing_in, 1);
         assert_eq!(exception.missing_out, 1);
         assert_eq!(exception.score, 2.0);
         assert_eq!(exception.notes, vec!["7.1上班未签到", "7.1下班未签退"]);
+    }
+
+    #[test]
+    fn hire_day_ignores_only_in_punch_exceptions() {
+        let mut daily = flexible_daily("09:00", "17:00");
+        daily.punch_slots[1].result = "早退".to_owned();
+        daily.missing_in_count = 1.0;
+        daily.missing_out_count = 1.0;
+
+        assert_eq!(daily_irregular_mark(&daily, "", false, true), "Z30缺卡");
+        let exception = calculate_exceptions(
+            "10001",
+            "测试员工",
+            "人事行政部",
+            &[&daily],
+            &[],
+            &[],
+            ExceptionOptions {
+                hire_day: Some(1),
+                ..Default::default()
+            },
+        )
+        .0
+        .expect("入职日的下班卡异常仍应计入");
+
+        assert_eq!(exception.missing_in, 0);
+        assert_eq!(exception.missing_out, 1);
+        assert_eq!(exception.late_or_early_30_to_120_minutes, 30);
+        assert_eq!(exception.score, 2.0);
+        assert_eq!(exception.notes, vec!["7.1下班未签退", "7.1早退30分钟"]);
+    }
+
+    #[test]
+    fn report_applies_in_punch_exception_exemption_only_on_hire_day() {
+        let mut monthly = empty_monthly_record();
+        monthly.department = "人事行政部".to_owned();
+        monthly.daily_results = vec![String::new(); 31];
+
+        let mut hire_day = flexible_daily("09:00", "17:30");
+        hire_day.employee_key = monthly.employee_key.clone();
+        hire_day.employee_no = monthly.employee_no.clone();
+        hire_day.name = monthly.name.clone();
+        hire_day.date = "26-07-20 星期一".to_owned();
+        hire_day.missing_in_count = 1.0;
+        let mut next_day = hire_day.clone();
+        next_day.date = "26-07-21 星期二".to_owned();
+        next_day.missing_in_count = 0.0;
+
+        let report = calculate_attendance(&AttendanceDataset {
+            period: crate::model::AttendancePeriod {
+                year: 2026,
+                month: 7,
+            },
+            monthly: vec![monthly],
+            daily: vec![hire_day, next_day],
+            invalid_punches: vec![],
+            employment_records: vec![EmploymentRecord {
+                employee_no: "10001".to_owned(),
+                name: "测试员工".to_owned(),
+                company: "JSFAE".to_owned(),
+                hire_date: Some(CalendarDate {
+                    year: 2026,
+                    month: 7,
+                    day: 20,
+                }),
+                termination_date: None,
+            }],
+            annual_leave_records: vec![],
+        });
+
+        assert_eq!(report.detail_rows[0].days[19].attendance, "√");
+        assert_eq!(report.detail_rows[0].days[20].attendance, "√D30");
+        let exception = &report.exception_rows[0];
+        assert_eq!(exception.missing_in, 0);
+        assert_eq!(exception.late_or_early_30_to_120_minutes, 30);
+        assert_eq!(exception.notes, vec!["7.21迟到30分钟"]);
     }
 
     #[test]
@@ -2517,7 +2684,7 @@ mod tests {
             &[&twenty_nine, &thirty],
             &[],
             &[],
-            false,
+            ExceptionOptions::default(),
         )
         .0
         .expect("29 分钟和 30 分钟均应进入异常表");

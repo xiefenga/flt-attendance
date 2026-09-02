@@ -80,7 +80,7 @@ fn parses_and_reconciles_real_dingtalk_export() {
         .sum();
 
     assert_eq!(report.summary_rows.len(), 236);
-    assert_eq!(report.exception_rows.len(), 59);
+    assert_eq!(report.exception_rows.len(), 36);
     assert!(report_weekday_overtime <= source_weekday_overtime);
     assert!(report_weekend_overtime <= source_weekend_overtime);
     assert!(
@@ -190,13 +190,10 @@ fn parses_and_reconciles_real_dingtalk_export() {
     assert_eq!(liu_hanfu.days[13].attendance, "O6");
     assert_eq!(liu_hanfu.days[14].attendance, "O8");
 
-    let chen_wenjie = report
-        .exception_rows
-        .iter()
-        .find(|row| row.name == "陈文杰")
-        .expect("应包含陈文杰异常");
-    assert_eq!(chen_wenjie.late_or_early_30_to_120_minutes, 120);
-    assert_eq!(chen_wenjie.score, 4.0);
+    assert!(
+        !report.exception_rows.iter().any(|row| row.name == "陈文杰"),
+        "陈文杰仅有的入职日上班卡异常应被忽略"
+    );
     let chen_wenjie_summary = report
         .summary_rows
         .iter()
