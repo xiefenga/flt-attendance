@@ -91,24 +91,42 @@ fn payable_overtime_hours(hours: f64) -> f64 {
     }
 }
 
-fn exclude_dinner_break_from_overtime(
+fn cap_overtime_by_effective_time(
     hours: f64,
     daily: &DailyRecord,
-    application_start: Option<u32>,
+    applications: Option<&[(u32, u32)]>,
 ) -> f64 {
-    const DINNER_BREAK_START: u32 = 17 * 60 + 30;
-    const DINNER_OVERTIME_THRESHOLD: u32 = 19 * 60 + 30;
-
     if hours <= 0.0 {
         return hours;
     }
-    if application_start.is_some_and(|start| start <= DINNER_BREAK_START)
-        && last_out_minutes(daily).is_some_and(|last_out| last_out >= DINNER_OVERTIME_THRESHOLD)
-    {
-        (hours - 0.5).max(0.0)
-    } else {
-        hours
+    let (Some(applications), Some((first_in, last_out))) = (applications, punch_range(daily))
+    else {
+        return hours;
+    };
+    let mut minutes = 0;
+    for &(start, end) in applications {
+        let lower = start.max(first_in);
+        let upper = end.min(last_out);
+        let mut effective = upper.saturating_sub(lower);
+        for day in lower / 1440..=upper / 1440 {
+            let offset = day * 1440;
+            // Subtract breaks from the time-based cap, never from declared hours.
+            effective = effective.saturating_sub(
+                upper
+                    .min(offset + 13 * 60)
+                    .saturating_sub(lower.max(offset + 12 * 60)),
+            );
+            if start <= offset + 17 * 60 + 30 && last_out >= offset + 19 * 60 + 30 {
+                effective = effective.saturating_sub(
+                    upper
+                        .min(offset + 18 * 60)
+                        .saturating_sub(lower.max(offset + 17 * 60 + 30)),
+                );
+            }
+        }
+        minutes += effective;
     }
+    hours.min(minutes as f64 / 60.0)
 }
 
 fn normalize_overtime_categories(mut hours: [f64; 3], total: f64) -> (f64, f64, f64) {
@@ -501,7 +519,10 @@ pub fn calculate_attendance_with_config(
             uses_six_day_schedule,
             employment,
         );
-        let has_daily_overtime = days.iter().any(|day| day.overtime_hours > 0.0);
+        let has_daily_overtime = days.iter().any(|day| day.overtime_hours > 0.0)
+            || active_daily_records
+                .iter()
+                .any(|daily| daily.overtime_hours > 0.0);
         let raw_daily_overtime =
             overtime_summary(&days, dataset.period.year, dataset.period.month, config);
         for (index, day) in days.iter_mut().enumerate() {
@@ -877,7 +898,7 @@ fn calculate_meal_allowance(
             overtime_meals += workday_overtime_meals(
                 daily,
                 punches,
-                result,
+                overtime_application_ranges(result, year, month, day as u8).as_deref(),
                 policy == MealPolicy::PunchOnly,
                 uses_flexible_arrival_shift,
             );
@@ -936,11 +957,11 @@ fn expected_workday_end(daily: &DailyRecord, uses_flexible_arrival_shift: bool) 
 fn workday_overtime_meals(
     daily: &DailyRecord,
     punches: Option<(u32, u32)>,
-    result: &str,
+    applications: Option<&[(u32, u32)]>,
     punch_only: bool,
     uses_flexible_arrival_shift: bool,
 ) -> u32 {
-    let Some((_, last_out)) = punches else {
+    let Some((first_in, last_out)) = punches else {
         return 0;
     };
     let effective_end = if punch_only {
@@ -949,12 +970,20 @@ fn workday_overtime_meals(
         if daily.overtime_hours <= 0.0 {
             return 0;
         }
+        if let Some(applications) = applications {
+            return [19 * 60 + 30, 24 * 60]
+                .into_iter()
+                .filter(|&threshold| {
+                    applications.iter().any(|&(start, end)| {
+                        start.max(first_in) < threshold && end.min(last_out) >= threshold
+                    })
+                })
+                .count() as u32;
+        }
         let Some(expected_end) = expected_workday_end(daily, uses_flexible_arrival_shift) else {
             return 0;
         };
-        let start = overtime_application_start(result)
-            .unwrap_or(expected_end)
-            .max(expected_end);
+        let start = expected_end;
         let actual_minutes = last_out.saturating_sub(start);
         if actual_minutes == 0 {
             return 0;
@@ -1116,7 +1145,6 @@ fn build_daily_attendance(
             "√".to_owned()
         };
         let mut overtime_hours = daily.map(|row| row.overtime_hours).unwrap_or(0.0);
-        let overtime_application_start = overtime_application_start(result);
         for part in result
             .split(',')
             .map(str::trim)
@@ -1136,10 +1164,10 @@ fn build_daily_attendance(
             }
         }
         if let Some(daily) = daily {
-            overtime_hours = exclude_dinner_break_from_overtime(
+            overtime_hours = cap_overtime_by_effective_time(
                 overtime_hours,
                 daily,
-                overtime_application_start,
+                overtime_application_ranges(result, year, month, (day_index + 1) as u8).as_deref(),
             );
         }
 
@@ -1566,7 +1594,7 @@ fn unique_process_amount_for_month(
 }
 
 #[derive(Debug, Clone, Copy)]
-struct LeaveProcessSpan {
+struct ProcessSpan {
     start: CalendarDate,
     end: CalendarDate,
     start_minutes: u32,
@@ -1584,7 +1612,7 @@ fn process_allocations_for_month(
     uses_six_day_schedule: bool,
     employment: Option<&EmploymentRecord>,
 ) -> Vec<(usize, f64)> {
-    let Some(span) = parse_leave_process_span(process, year, month, standard_daily_hours) else {
+    let Some(span) = parse_process_span(process, year, month, standard_daily_hours) else {
         return occurrence_indexes
             .iter()
             .copied()
@@ -1647,12 +1675,12 @@ fn process_allocations_for_month(
         .collect()
 }
 
-fn parse_leave_process_span(
+fn parse_process_span(
     process: &str,
     report_year: u16,
     report_month: u8,
     standard_daily_hours: f64,
-) -> Option<LeaveProcessSpan> {
+) -> Option<ProcessSpan> {
     let month_days = extract_month_days(process);
     let [(start_month, start_day), (end_month, end_day), ..] = month_days.as_slice() else {
         return None;
@@ -1678,7 +1706,7 @@ fn parse_leave_process_span(
     let total_hours = extract_amount_before(process, "天")
         .map(|days| days * standard_daily_hours)
         .or_else(|| extract_amount_before(process, "小时"))?;
-    Some(LeaveProcessSpan {
+    Some(ProcessSpan {
         start,
         end,
         start_minutes: *start_minutes,
@@ -1805,13 +1833,52 @@ fn extract_amount_before(text: &str, unit: &str) -> Option<f64> {
     before[start..].parse().ok()
 }
 
-fn overtime_application_start(result: &str) -> Option<u32> {
-    result
+fn overtime_application_ranges(
+    result: &str,
+    year: u16,
+    month: u8,
+    day: u8,
+) -> Option<Vec<(u32, u32)>> {
+    let date = valid_calendar_date(year, month, day)?;
+    let mut ranges = Vec::new();
+    for part in result
         .split(',')
         .map(str::trim)
         .filter(|part| part.starts_with("加班"))
-        .filter_map(|part| extract_clock_minutes(part).first().copied())
-        .min()
+    {
+        let span = parse_process_span(part, year, month, 8.0)?;
+        if date < span.start || date > span.end {
+            continue;
+        }
+        let start = if span.start == date {
+            span.start_minutes
+        } else {
+            0
+        };
+        let mut end = span.end_minutes;
+        let mut end_date = date;
+        while end_date < span.end {
+            end_date = next_calendar_date(end_date)?;
+            end += 1440;
+        }
+        if end <= start {
+            return None;
+        }
+        ranges.push((start, end));
+    }
+    if ranges.is_empty() {
+        return None;
+    }
+    ranges.sort_unstable();
+    let mut merged: Vec<(u32, u32)> = Vec::new();
+    for (start, end) in ranges {
+        if let Some(last) = merged.last_mut().filter(|last| start <= last.1) {
+            last.1 = last.1.max(end);
+        } else {
+            merged.push((start, end));
+        }
+    }
+    Some(merged)
 }
 
 fn extract_clock_minutes(text: &str) -> Vec<u32> {
@@ -1827,7 +1894,7 @@ fn extract_clock_minutes(text: &str) -> Vec<u32> {
         {
             let hour = ((bytes[index] - b'0') as u32) * 10 + (bytes[index + 1] - b'0') as u32;
             let minute = ((bytes[index + 3] - b'0') as u32) * 10 + (bytes[index + 4] - b'0') as u32;
-            if hour < 24 && minute < 60 {
+            if (hour < 24 && minute < 60) || (hour == 24 && minute == 0) {
                 result.push(hour * 60 + minute);
             }
             index += 5;
@@ -2310,18 +2377,115 @@ mod tests {
                 .iter()
                 .map(|day| day.overtime_hours)
                 .collect::<Vec<_>>(),
-            vec![2.0, 1.5, 0.0]
+            vec![1.5, 1.5, 1.0]
         );
-        assert_eq!(detail.summary.weekday_overtime_hours, 3.5);
-        assert_eq!(detail.summary.actual_attendance_hours, Some(27.5));
-        assert_eq!(detail.summary.overtime_meal_count, 1.0);
+        assert_eq!(detail.summary.weekday_overtime_hours, 4.0);
+        assert_eq!(detail.summary.actual_attendance_hours, Some(28.0));
+        assert_eq!(detail.summary.overtime_meal_count, 2.0);
+    }
+
+    #[test]
+    fn declared_overtime_is_capped_without_deducting_breaks_twice() {
+        for (start, end, arrival, departure, declared, expected, meals) in [
+            ("17:30", "19:30", "08:30", "19:30", 2.0, 1.5, 1),
+            ("17:30", "19:30", "08:30", "19:30", 1.5, 1.5, 1),
+            ("17:30", "19:30", "08:30", "19:30", 1.0, 1.0, 1),
+            ("17:30", "19:30", "08:30", "19:30", 0.0, 0.0, 0),
+            ("17:30", "19:30", "08:30", "19:29", 2.0, 1.5, 0),
+            ("17:30", "19:00", "08:30", "20:00", 2.0, 1.0, 0),
+            ("18:00", "19:30", "08:30", "19:44", 1.5, 1.5, 1),
+            ("17:30", "19:30", "18:00", "19:30", 1.5, 1.5, 1),
+            ("17:30", "24:00", "08:30", "次日 00:00", 6.0, 6.0, 2),
+            ("08:30", "19:30", "08:30", "19:30", 10.0, 9.5, 1),
+            ("08:30", "19:30", "08:30", "19:30", 9.5, 9.5, 1),
+        ] {
+            let result = format!("加班07-01 {start}到07-01 {end} {declared}小时");
+            let applications = overtime_application_ranges(&result, 2026, 7, 1);
+            let daily = overtime_daily_with_punches("26-07-01", arrival, departure, declared);
+            assert_eq!(
+                payable_overtime_hours(cap_overtime_by_effective_time(
+                    declared,
+                    &daily,
+                    applications.as_deref()
+                )),
+                expected,
+                "{result}, {arrival}-{departure}"
+            );
+            assert_eq!(
+                workday_overtime_meals(
+                    &daily,
+                    punch_range(&daily),
+                    applications.as_deref(),
+                    false,
+                    false
+                ),
+                meals,
+                "{result}, {arrival}-{departure}"
+            );
+        }
+    }
+
+    #[test]
+    fn overtime_ranges_preserve_gaps_merge_overlap_and_handle_midnight() {
+        let result = "加班07-31 17:30到07-31 19:00 1小时,加班07-31 18:00到07-31 19:00 1小时,加班07-31 20:00到08-01 00:00 4小时";
+        let applications = overtime_application_ranges(result, 2026, 7, 31);
+        assert_eq!(applications, Some(vec![(1050, 1140), (1200, 1440)]));
+        let daily = overtime_daily_with_punches("26-07-31", "08:30", "次日 00:00", 6.0);
+        assert_eq!(
+            cap_overtime_by_effective_time(6.0, &daily, applications.as_deref()),
+            5.0
+        );
+        assert_eq!(
+            workday_overtime_meals(
+                &daily,
+                punch_range(&daily),
+                applications.as_deref(),
+                false,
+                false
+            ),
+            1
+        );
+        assert_eq!(
+            overtime_application_ranges("加班12-31 23:00到01-01 01:00 2小时", 2026, 12, 31),
+            Some(vec![(1380, 1500)])
+        );
+        assert_eq!(
+            overtime_application_ranges("加班07-01 17:30 1.5小时", 2026, 7, 1),
+            None
+        );
+        assert_eq!(cap_overtime_by_effective_time(1.5, &daily, None), 1.5);
+    }
+
+    #[test]
+    fn zero_effective_overtime_does_not_restore_monthly_declared_hours() {
+        let mut monthly = empty_monthly_record();
+        monthly.weekday_overtime_hours = 2.0;
+        monthly.daily_results = vec!["加班07-01 20:00到07-01 22:00 2小时".to_owned()];
+        let report = calculate_attendance(&AttendanceDataset {
+            period: crate::model::AttendancePeriod {
+                year: 2026,
+                month: 7,
+            },
+            monthly: vec![monthly],
+            daily: vec![overtime_daily_with_punches(
+                "26-07-01", "08:30", "19:30", 2.0,
+            )],
+            invalid_punches: vec![],
+            employment_records: vec![],
+            annual_leave_records: vec![],
+        });
+        let detail = &report.detail_rows[0];
+        assert_eq!(detail.days[0].overtime_hours, 0.0);
+        assert_eq!(detail.summary.weekday_overtime_hours, 0.0);
+        assert_eq!(detail.summary.actual_attendance_hours, Some(8.0));
+        assert_eq!(detail.summary.overtime_meal_count, 0.0);
     }
 
     #[test]
     fn dinner_break_is_not_subtracted_when_application_starts_after_1730() {
         let daily = overtime_daily_with_punches("26-07-01", "08:30", "21:00", 3.0);
         assert_eq!(
-            exclude_dinner_break_from_overtime(3.0, &daily, Some(18 * 60)),
+            cap_overtime_by_effective_time(3.0, &daily, Some(&[(18 * 60, 21 * 60)])),
             3.0
         );
     }
@@ -2330,10 +2494,10 @@ mod tests {
     fn dinner_break_uses_application_start_instead_of_first_punch() {
         let daily = overtime_daily_with_punches("26-07-01", "18:00", "21:00", 3.5);
         assert_eq!(
-            exclude_dinner_break_from_overtime(3.5, &daily, Some(17 * 60 + 30)),
+            cap_overtime_by_effective_time(3.5, &daily, Some(&[(17 * 60 + 30, 21 * 60)])),
             3.0
         );
-        assert_eq!(exclude_dinner_break_from_overtime(3.5, &daily, None), 3.5);
+        assert_eq!(cap_overtime_by_effective_time(3.5, &daily, None), 3.5);
     }
 
     #[test]
@@ -2726,7 +2890,7 @@ mod tests {
     fn regular_workday_meal_requires_approval_and_uses_shorter_duration() {
         let no_approval = meal_daily("08:30", "19:30", 0.0);
         assert_eq!(
-            workday_overtime_meals(&no_approval, punch_range(&no_approval), "", false, false),
+            workday_overtime_meals(&no_approval, punch_range(&no_approval), None, false, false),
             0
         );
 
@@ -2735,7 +2899,7 @@ mod tests {
             workday_overtime_meals(
                 &insufficient_approval,
                 punch_range(&insufficient_approval),
-                "",
+                None,
                 false,
                 false
             ),
@@ -2744,13 +2908,13 @@ mod tests {
 
         let one_meal = meal_daily("08:30", "19:30", 2.0);
         assert_eq!(
-            workday_overtime_meals(&one_meal, punch_range(&one_meal), "", false, false),
+            workday_overtime_meals(&one_meal, punch_range(&one_meal), None, false, false),
             1
         );
 
         let two_meals = meal_daily("08:30", "次日 00:00", 6.5);
         assert_eq!(
-            workday_overtime_meals(&two_meals, punch_range(&two_meals), "", false, false),
+            workday_overtime_meals(&two_meals, punch_range(&two_meals), None, false, false),
             2
         );
     }
@@ -2761,7 +2925,13 @@ mod tests {
         for (departure, expected) in [("19:29", 0), ("19:30", 1), ("19:44", 1)] {
             let daily = meal_daily("08:25", departure, 1.5);
             assert_eq!(
-                workday_overtime_meals(&daily, punch_range(&daily), result, false, false),
+                workday_overtime_meals(
+                    &daily,
+                    punch_range(&daily),
+                    overtime_application_ranges(result, 2026, 8, 3).as_deref(),
+                    false,
+                    false
+                ),
                 expected,
                 "{departure}"
             );
@@ -2771,7 +2941,13 @@ mod tests {
             workday_overtime_meals(
                 &daily,
                 punch_range(&daily),
-                "正常,加班08-03 20:00到08-03 21:30 1.5小时",
+                overtime_application_ranges(
+                    "正常,加班08-03 20:00到08-03 21:30 1.5小时",
+                    2026,
+                    8,
+                    3
+                )
+                .as_deref(),
                 false,
                 false
             ),
@@ -2847,7 +3023,7 @@ mod tests {
     fn punch_only_workday_meal_ignores_approval() {
         let daily = meal_daily("08:30", "次日 00:00", 0.0);
         assert_eq!(
-            workday_overtime_meals(&daily, punch_range(&daily), "", true, false),
+            workday_overtime_meals(&daily, punch_range(&daily), None, true, false),
             2
         );
     }
