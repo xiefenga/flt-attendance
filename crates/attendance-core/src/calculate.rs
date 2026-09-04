@@ -877,6 +877,7 @@ fn calculate_meal_allowance(
             overtime_meals += workday_overtime_meals(
                 daily,
                 punches,
+                result,
                 policy == MealPolicy::PunchOnly,
                 uses_flexible_arrival_shift,
             );
@@ -935,6 +936,7 @@ fn expected_workday_end(daily: &DailyRecord, uses_flexible_arrival_shift: bool) 
 fn workday_overtime_meals(
     daily: &DailyRecord,
     punches: Option<(u32, u32)>,
+    result: &str,
     punch_only: bool,
     uses_flexible_arrival_shift: bool,
 ) -> u32 {
@@ -950,9 +952,15 @@ fn workday_overtime_meals(
         let Some(expected_end) = expected_workday_end(daily, uses_flexible_arrival_shift) else {
             return 0;
         };
-        let actual_minutes = last_out.saturating_sub(expected_end);
+        let start = overtime_application_start(result)
+            .unwrap_or(expected_end)
+            .max(expected_end);
+        let actual_minutes = last_out.saturating_sub(start);
+        if actual_minutes == 0 {
+            return 0;
+        }
         let approved_minutes = (daily.overtime_hours * 60.0).round().max(0.0) as u32;
-        expected_end + actual_minutes.min(approved_minutes)
+        start + actual_minutes.min(approved_minutes)
     };
     u32::from(effective_end >= 19 * 60 + 30) + u32::from(effective_end >= 24 * 60)
 }
@@ -983,7 +991,7 @@ fn off_day_overtime_meals(
     for (start, end) in segments {
         let actual = last_out.min(end).saturating_sub(first_in.max(start));
         let effective = actual.min(remaining);
-        if effective >= 2 * 60 {
+        if effective >= 2 * 60 && (end != 19 * 60 + 30 || last_out >= end) {
             meals += 1;
         }
         remaining = remaining.saturating_sub(effective);
@@ -1108,18 +1116,13 @@ fn build_daily_attendance(
             "√".to_owned()
         };
         let mut overtime_hours = daily.map(|row| row.overtime_hours).unwrap_or(0.0);
-        let mut overtime_application_start = None;
+        let overtime_application_start = overtime_application_start(result);
         for part in result
             .split(',')
             .map(str::trim)
             .filter(|part| !part.is_empty())
         {
             if part.starts_with("加班") {
-                if let Some(start) = extract_clock_minutes(part).first().copied() {
-                    overtime_application_start = Some(
-                        overtime_application_start.map_or(start, |current: u32| current.min(start)),
-                    );
-                }
                 if daily.is_none() {
                     overtime_hours += extract_amount_before(part, "小时").unwrap_or(0.0);
                 }
@@ -1800,6 +1803,15 @@ fn extract_amount_before(text: &str, unit: &str) -> Option<f64> {
         .last()
         .map(|(index, _)| index)?;
     before[start..].parse().ok()
+}
+
+fn overtime_application_start(result: &str) -> Option<u32> {
+    result
+        .split(',')
+        .map(str::trim)
+        .filter(|part| part.starts_with("加班"))
+        .filter_map(|part| extract_clock_minutes(part).first().copied())
+        .min()
 }
 
 fn extract_clock_minutes(text: &str) -> Vec<u32> {
@@ -2714,7 +2726,7 @@ mod tests {
     fn regular_workday_meal_requires_approval_and_uses_shorter_duration() {
         let no_approval = meal_daily("08:30", "19:30", 0.0);
         assert_eq!(
-            workday_overtime_meals(&no_approval, punch_range(&no_approval), false, false),
+            workday_overtime_meals(&no_approval, punch_range(&no_approval), "", false, false),
             0
         );
 
@@ -2723,6 +2735,7 @@ mod tests {
             workday_overtime_meals(
                 &insufficient_approval,
                 punch_range(&insufficient_approval),
+                "",
                 false,
                 false
             ),
@@ -2731,22 +2744,110 @@ mod tests {
 
         let one_meal = meal_daily("08:30", "19:30", 2.0);
         assert_eq!(
-            workday_overtime_meals(&one_meal, punch_range(&one_meal), false, false),
+            workday_overtime_meals(&one_meal, punch_range(&one_meal), "", false, false),
             1
         );
 
         let two_meals = meal_daily("08:30", "次日 00:00", 6.5);
         assert_eq!(
-            workday_overtime_meals(&two_meals, punch_range(&two_meals), false, false),
+            workday_overtime_meals(&two_meals, punch_range(&two_meals), "", false, false),
             2
         );
+    }
+
+    #[test]
+    fn workday_meal_uses_application_start_and_actual_departure() {
+        let result = "正常,加班08-03 18:00到08-03 19:30 1.5小时";
+        for (departure, expected) in [("19:29", 0), ("19:30", 1), ("19:44", 1)] {
+            let daily = meal_daily("08:25", departure, 1.5);
+            assert_eq!(
+                workday_overtime_meals(&daily, punch_range(&daily), result, false, false),
+                expected,
+                "{departure}"
+            );
+        }
+        let daily = meal_daily("08:25", "19:44", 1.5);
+        assert_eq!(
+            workday_overtime_meals(
+                &daily,
+                punch_range(&daily),
+                "正常,加班08-03 20:00到08-03 21:30 1.5小时",
+                false,
+                false
+            ),
+            0
+        );
+    }
+
+    #[test]
+    fn august_meals_count_seven_weekdays_and_four_saturdays() {
+        let mut monthly = empty_monthly_record();
+        monthly.daily_results = vec![String::new(); 31];
+        let mut daily = Vec::new();
+        for (day, arrival, departure, hours) in [
+            (1, "08:23", "17:47", 8.0),
+            (3, "08:25", "19:44", 1.5),
+            (4, "08:24", "19:58", 1.5),
+            (5, "08:26", "19:46", 1.5),
+            (6, "08:24", "19:53", 1.5),
+            (8, "08:28", "17:44", 8.0),
+            (10, "08:25", "19:51", 1.5),
+            (11, "08:27", "19:44", 1.5),
+            (15, "08:26", "17:43", 8.0),
+            (17, "08:25", "19:39", 1.5),
+            (29, "08:16", "17:39", 8.0),
+        ] {
+            monthly.daily_results[day - 1] = if hours == 1.5 {
+                format!("正常,加班08-{day:02} 18:00到08-{day:02} 19:30 1.5小时")
+            } else {
+                format!("休息并打卡,加班08-{day:02} 08:30到08-{day:02} 17:30 8小时")
+            };
+            daily.push(overtime_daily_with_punches(
+                &format!("26-08-{day:02}"),
+                arrival,
+                departure,
+                hours,
+            ));
+        }
+        assert_eq!(
+            calculate_meal_allowance(
+                &monthly,
+                &daily.iter().collect::<Vec<_>>(),
+                2026,
+                8,
+                MealPolicy::Regular,
+                false,
+                None,
+            ),
+            (7.0, 11.0)
+        );
+    }
+
+    #[test]
+    fn off_day_afternoon_meal_requires_two_hours_and_1930_departure() {
+        for punch_only in [false, true] {
+            for (departure, expected) in [(17 * 60 + 30, 1), (19 * 60 + 29, 1), (19 * 60 + 30, 2)] {
+                assert_eq!(
+                    off_day_overtime_meals(Some((8 * 60 + 30, departure)), 8.0, punch_only),
+                    expected
+                );
+            }
+            assert_eq!(
+                off_day_overtime_meals(Some((17 * 60 + 31, 19 * 60 + 30)), 2.0, punch_only),
+                0
+            );
+            assert_eq!(
+                off_day_overtime_meals(Some((17 * 60 + 30, 19 * 60 + 30)), 2.0, punch_only),
+                1
+            );
+        }
     }
 
     #[test]
     fn punch_only_workday_meal_ignores_approval() {
         let daily = meal_daily("08:30", "次日 00:00", 0.0);
         assert_eq!(
-            workday_overtime_meals(&daily, punch_range(&daily), true, false),
+            workday_overtime_meals(&daily, punch_range(&daily), "", true, false),
             2
         );
     }
