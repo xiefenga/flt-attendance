@@ -857,7 +857,16 @@ fn calculate_meal_allowance(
         return (0.0, 0.0);
     }
     if policy == MealPolicy::ScheduledWithoutPunch {
-        let workdays = calendar_workdays_in_employment(year, month, employment);
+        let workdays = (1..=days_in_month(year, month))
+            .filter(|day| {
+                holiday::is_workday(year, month, *day as u8)
+                    && is_active_day(employment, year, month, *day)
+                    && monthly
+                        .daily_results
+                        .get(*day - 1)
+                        .is_none_or(|result| !result.contains("出差"))
+            })
+            .count();
         return (workdays as f64, 0.0);
     }
 
@@ -886,6 +895,9 @@ fn calculate_meal_allowance(
             .get(day - 1)
             .map(String::as_str)
             .unwrap_or("");
+        if result.contains("出差") {
+            continue;
+        }
         let is_workday = holiday::is_workday(year, month, day as u8);
 
         let punches = punch_range(daily);
@@ -2867,6 +2879,49 @@ mod tests {
         assert_eq!(exception.late_or_early_11_to_30, 1);
         assert_eq!(exception.late_or_early_30_to_120_minutes, 30);
         assert_eq!(exception.score, 3.0);
+    }
+
+    #[test]
+    fn travel_days_never_receive_meals_even_with_overtime() {
+        for (month, day, is_workday) in [(7, 1, true), (7, 4, false), (10, 1, false)] {
+            let mut monthly = empty_monthly_record();
+            monthly.daily_results = vec![String::new(); days_in_month(2026, month)];
+            let mut daily = meal_daily("08:30", "次日 00:00", 16.0);
+            daily.date = format!("26-{month:02}-{day:02}");
+            for policy in [
+                MealPolicy::Regular,
+                MealPolicy::PunchOnly,
+                MealPolicy::ScheduledWithoutPunch,
+            ] {
+                for result in ["正常", "出差1天", "出差0.5天,加班16小时"] {
+                    monthly.daily_results[day - 1] = result.to_owned();
+                    let expected = if policy == MealPolicy::ScheduledWithoutPunch {
+                        let workdays = calendar_workdays_in_employment(2026, month, None);
+                        let excluded = usize::from(is_workday && result.contains("出差"));
+                        ((workdays - excluded) as f64, 0.0)
+                    } else if result.contains("出差") {
+                        (0.0, 0.0)
+                    } else if is_workday {
+                        (1.0, 2.0)
+                    } else {
+                        (0.0, 3.0)
+                    };
+                    assert_eq!(
+                        calculate_meal_allowance(
+                            &monthly,
+                            &[&daily],
+                            2026,
+                            month,
+                            policy,
+                            false,
+                            None,
+                        ),
+                        expected,
+                        "{month}-{day} {policy:?} {result}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

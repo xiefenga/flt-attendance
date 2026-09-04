@@ -254,10 +254,10 @@ fn parses_and_reconciles_real_dingtalk_export() {
             .iter()
             .all(|day| day.overtime_hours == 0.0)
     );
-    for (employee_no, expected_actual, expected_absent) in [
-        ("25196", 136.0, 48.0),
-        ("25182", 184.0, 0.0),
-        ("24135", 184.0, 0.0),
+    for (employee_no, expected_actual, expected_absent, expected_meals) in [
+        ("25196", 136.0, 48.0, 23.0),
+        ("25182", 184.0, 0.0, 23.0),
+        ("24135", 184.0, 0.0, 21.0), // 7 月 23、24 日出差，无餐补。
     ] {
         let summary = configured
             .summary_rows
@@ -267,7 +267,7 @@ fn parses_and_reconciles_real_dingtalk_export() {
         assert_eq!(summary.expected_attendance_hours, 184.0);
         assert_eq!(summary.actual_attendance_hours, Some(expected_actual));
         assert_eq!(summary.absent_hours, expected_absent);
-        assert_eq!(summary.attendance_meal_count, 23.0);
+        assert_eq!(summary.attendance_meal_count, expected_meals);
         assert_eq!(summary.overtime_meal_count, 0.0);
         assert_eq!(summary.weekday_overtime_hours, 0.0);
         assert_eq!(summary.weekend_overtime_hours, 0.0);
