@@ -1257,18 +1257,24 @@ fn leave_symbol(process: &str) -> Option<&'static str> {
     .find_map(|(name, symbol)| process.starts_with(name).then_some(symbol))
 }
 
-fn allocate_process_hours(process: &str, occurrence_count: usize) -> Vec<f64> {
+fn allocate_process_hours(
+    process: &str,
+    occurrence_count: usize,
+    standard_daily_hours: f64,
+) -> Vec<f64> {
     if occurrence_count == 0 {
         return Vec::new();
     }
-    if extract_amount_before(process, "天").is_some() {
-        return vec![8.0; occurrence_count];
-    }
-    let total = extract_amount_before(process, "小时").unwrap_or(0.0);
+    let total = round_leave_hours(
+        extract_amount_before(process, "天")
+            .map(|days| days * standard_daily_hours)
+            .or_else(|| extract_amount_before(process, "小时"))
+            .unwrap_or(0.0),
+    );
     let mut remaining = total;
     let mut result = vec![0.0; occurrence_count];
     for amount in result.iter_mut().rev() {
-        *amount = remaining.min(8.0);
+        *amount = remaining.min(standard_daily_hours);
         remaining = (remaining - *amount).max(0.0);
     }
     result
@@ -1560,7 +1566,15 @@ fn is_scheduled_shift(shift: &str) -> bool {
 }
 
 fn summary_or_process_hours(summary_present: bool, summary: f64, process: f64) -> f64 {
-    if summary_present { summary } else { process }
+    round_leave_hours(if summary_present { summary } else { process })
+}
+
+fn round_leave_hours(hours: f64) -> f64 {
+    if hours > 0.0 {
+        (hours * 2.0).ceil() / 2.0
+    } else {
+        hours
+    }
 }
 
 fn unique_process_amount_for_month(
@@ -1628,7 +1642,11 @@ fn process_allocations_for_month(
         return occurrence_indexes
             .iter()
             .copied()
-            .zip(allocate_process_hours(process, occurrence_indexes.len()))
+            .zip(allocate_process_hours(
+                process,
+                occurrence_indexes.len(),
+                standard_daily_hours,
+            ))
             .collect();
     };
     let daily_by_day = daily_records
@@ -1715,9 +1733,11 @@ fn parse_process_span(
     if end < start {
         return None;
     }
-    let total_hours = extract_amount_before(process, "天")
-        .map(|days| days * standard_daily_hours)
-        .or_else(|| extract_amount_before(process, "小时"))?;
+    let total_hours = round_leave_hours(
+        extract_amount_before(process, "天")
+            .map(|days| days * standard_daily_hours)
+            .or_else(|| extract_amount_before(process, "小时"))?,
+    );
     Some(ProcessSpan {
         start,
         end,
@@ -2070,6 +2090,107 @@ mod tests {
             extract_amount_before("育儿假07-01 3.5小时", "小时"),
             Some(3.5)
         );
+    }
+
+    #[test]
+    fn leave_hours_round_up_to_half_hour_units() {
+        for (source, expected) in [
+            (0.0, 0.0),
+            (0.01, 0.5),
+            (0.49, 0.5),
+            (0.5, 0.5),
+            (0.51, 1.0),
+            (1.0, 1.0),
+            (1.01, 1.5),
+        ] {
+            assert_eq!(round_leave_hours(source), expected);
+        }
+        assert_eq!(
+            allocate_process_hours("婚假07-01 0.01天", 1, 8.0),
+            vec![0.5]
+        );
+        assert_eq!(
+            allocate_process_hours("婚假07-01 0.07天", 1, 8.0),
+            vec![1.0]
+        );
+        assert_eq!(
+            allocate_process_hours("婚假07-01 0.13天", 1, 4.0),
+            vec![1.0]
+        );
+    }
+
+    #[test]
+    fn every_leave_process_rounds_up_to_half_an_hour() {
+        for name in [
+            "事假",
+            "调休",
+            "病假",
+            "年假",
+            "哺乳假",
+            "婚假",
+            "产假",
+            "陪产假",
+            "丧假",
+            "例假",
+            "育儿假",
+            "产检假",
+        ] {
+            let results = [format!("{name}07-01 08:30到07-01 08:36 0.1小时")];
+            assert_eq!(
+                unique_process_amount_for_month(&results, name, &[], 2026, 7, 8.0, false, None,),
+                0.5,
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn monthly_leave_summaries_round_up_before_attendance_calculation() {
+        let mut monthly = empty_monthly_record();
+        monthly.personal_leave_hours = 0.1;
+        monthly.compensatory_leave_hours = 0.1;
+        monthly.sick_leave_hours = 0.1;
+        monthly.breastfeeding_leave_hours = 0.1;
+        monthly.marriage_leave_days = 0.01;
+        monthly.maternity_leave_days = 0.01;
+        monthly.paternity_leave_days = 0.01;
+        monthly.bereavement_leave_days = 0.01;
+        monthly.menstrual_leave_days = 0.01;
+        monthly.leave_summary_present = crate::model::MonthlyLeaveSummaryPresence {
+            personal: true,
+            compensatory: true,
+            sick: true,
+            maternity: true,
+            paternity: true,
+            marriage: true,
+            menstrual: true,
+            bereavement: true,
+            breastfeeding: true,
+            ..Default::default()
+        };
+        let mut daily = flexible_daily("08:30", "17:30");
+        daily.employee_key = monthly.employee_key.clone();
+        daily.employee_no = monthly.employee_no.clone();
+        daily.name = monthly.name.clone();
+        let report = calculate_attendance(&AttendanceDataset {
+            period: crate::model::AttendancePeriod {
+                year: 2026,
+                month: 7,
+            },
+            monthly: vec![monthly],
+            daily: vec![daily],
+            invalid_punches: vec![],
+            employment_records: vec![],
+            annual_leave_records: vec![],
+        });
+        let summary = &report.summary_rows[0];
+        assert_eq!(summary.personal_leave_hours, 0.5);
+        assert_eq!(summary.sick_leave_hours, 0.5);
+        assert_eq!(summary.breastfeeding_leave_hours, 0.5);
+        assert_eq!(summary.marriage_leave_hours, 0.5);
+        assert_eq!(summary.maternity_leave_hours, 1.0);
+        assert_eq!(summary.bereavement_leave_hours, 0.5);
+        assert_eq!(summary.actual_attendance_hours, Some(3.5));
     }
 
     #[test]
