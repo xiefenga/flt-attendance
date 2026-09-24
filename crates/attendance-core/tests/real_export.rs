@@ -80,7 +80,15 @@ fn parses_and_reconciles_real_dingtalk_export() {
         .sum();
 
     assert_eq!(report.summary_rows.len(), 236);
-    assert_eq!(report.exception_rows.len(), 36);
+    assert_eq!(report.exception_rows.len(), 52);
+    let zhang_liwen_exception = report
+        .exception_rows
+        .iter()
+        .find(|row| row.employee_no == "24135")
+        .expect("张丽雯出差日缺少下班卡，应进入异常表");
+    assert_eq!(zhang_liwen_exception.missing_in, 0);
+    assert_eq!(zhang_liwen_exception.missing_out, 1);
+    assert_eq!(zhang_liwen_exception.notes, vec!["7.23下班未签退"]);
     assert!(report_weekday_overtime <= source_weekday_overtime);
     assert!(report_weekend_overtime <= source_weekend_overtime);
     assert!(

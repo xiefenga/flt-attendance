@@ -1223,16 +1223,13 @@ fn build_daily_attendance(
     }
     for (index, leave_hours) in leave_hours_by_day.into_iter().enumerate() {
         if !leave_hours.is_empty() {
-            let prefix = if cells[index].attendance == "C" {
-                "C"
-            } else {
-                ""
-            };
+            let travel_suffix = cells[index].attendance.strip_prefix('C');
+            let prefix = if travel_suffix.is_some() { "C" } else { "" };
             let marks = leave_hours
                 .into_iter()
                 .map(|(symbol, amount)| format!("{symbol}{}", format_hours(amount)))
                 .collect::<String>();
-            cells[index].attendance = format!("{prefix}{marks}");
+            cells[index].attendance = format!("{prefix}{marks}{}", travel_suffix.unwrap_or(""));
         }
     }
 
@@ -1324,13 +1321,13 @@ fn daily_irregular_mark(
     uses_flexible_arrival_shift: bool,
     ignores_in_exception: bool,
 ) -> String {
+    let (missing_in, missing_out) = missing_punch_counts(daily, attendance_result);
     if uses_flexible_arrival_shift {
         let mut marks = flexible_arrival_irregular_minutes(daily, attendance_result)
             .map(|minutes| format!("Z{minutes}"))
             .into_iter()
             .collect::<Vec<_>>();
-        if (!ignores_in_exception && daily.missing_in_count > 0.0) || daily.missing_out_count > 0.0
-        {
+        if (!ignores_in_exception && missing_in > 0) || missing_out > 0 {
             marks.push("缺卡".to_owned());
         }
         return marks.join("");
@@ -1363,10 +1360,26 @@ fn daily_irregular_mark(
             marks.push(format!("{symbol}{minutes}"));
         }
     }
-    if (!ignores_in_exception && daily.missing_in_count > 0.0) || daily.missing_out_count > 0.0 {
+    if (!ignores_in_exception && missing_in > 0) || missing_out > 0 {
         marks.push("缺卡".to_owned());
     }
     marks.join("")
+}
+
+fn missing_punch_counts(daily: &DailyRecord, attendance_result: &str) -> (u32, u32) {
+    let mut missing_in = daily.missing_in_count.round().max(0.0) as u32;
+    let mut missing_out = daily.missing_out_count.round().max(0.0) as u32;
+    if attendance_result.contains("出差") && is_scheduled_shift(&daily.shift) {
+        let has_valid_punch = |kind| {
+            daily
+                .punch_slots
+                .iter()
+                .any(|slot| slot.kind == kind && parse_punch_minutes(&slot.time).is_some())
+        };
+        missing_in = missing_in.max(u32::from(!has_valid_punch(PunchKind::In)));
+        missing_out = missing_out.max(u32::from(!has_valid_punch(PunchKind::Out)));
+    }
+    (missing_in, missing_out)
 }
 
 fn day_from_date(text: &str) -> Option<usize> {
@@ -1428,16 +1441,19 @@ fn calculate_exceptions(
 
     for daily in daily_records {
         let date = display_date(&daily.date);
+        let attendance_result = day_from_date(&daily.date)
+            .and_then(|day| daily_results.get(day.saturating_sub(1)))
+            .map(String::as_str)
+            .unwrap_or("");
         let ignores_in_exception = options
             .hire_day
             .is_some_and(|hire_day| day_from_date(&daily.date) == Some(hire_day));
-        let reported_missing_in = daily.missing_in_count.round().max(0.0) as u32;
+        let (reported_missing_in, missing_out) = missing_punch_counts(daily, attendance_result);
         let missing_in = if ignores_in_exception {
             0
         } else {
             reported_missing_in
         };
-        let missing_out = daily.missing_out_count.round().max(0.0) as u32;
         if missing_in > 0 {
             row.missing_in += missing_in;
             row.notes.push(format!("{date}上班未签到"));
@@ -1463,10 +1479,6 @@ fn calculate_exceptions(
         }
 
         if options.uses_flexible_arrival_shift {
-            let attendance_result = day_from_date(&daily.date)
-                .and_then(|day| daily_results.get(day.saturating_sub(1)))
-                .map(String::as_str)
-                .unwrap_or("");
             if let Some(minutes) = flexible_arrival_irregular_minutes(daily, attendance_result) {
                 classify_minutes(
                     &mut row,
@@ -2901,6 +2913,44 @@ mod tests {
         assert_eq!(exception.missing_out, 1);
         assert_eq!(exception.score, 2.0);
         assert_eq!(exception.notes, vec!["7.1上班未签到", "7.1下班未签退"]);
+    }
+
+    #[test]
+    fn travel_days_derive_missing_punches_when_dingtalk_reports_no_exception() {
+        let mut monthly = empty_monthly_record();
+        monthly.daily_results = vec![String::new(); 31];
+        monthly.daily_results[0] = "出差1天,事假07-01 08:30到07-01 09:00 0.5小时".to_owned();
+        monthly.daily_results[1] = "出差1天".to_owned();
+
+        let mut no_punches = meal_daily("08:30", "17:30", 0.0);
+        no_punches.punch_slots.clear();
+        let mut missing_out = meal_daily("08:30", "17:30", 0.0);
+        missing_out.date = "26-07-02 星期四".to_owned();
+        missing_out.punch_slots.truncate(1);
+
+        assert_eq!(missing_punch_counts(&no_punches, "正常"), (0, 0));
+        let report = calculate_attendance(&AttendanceDataset {
+            period: crate::model::AttendancePeriod {
+                year: 2026,
+                month: 7,
+            },
+            monthly: vec![monthly],
+            daily: vec![no_punches, missing_out],
+            invalid_punches: vec![],
+            employment_records: vec![],
+            annual_leave_records: vec![],
+        });
+
+        assert_eq!(report.detail_rows[0].days[0].attendance, "CO0.5缺卡");
+        assert_eq!(report.detail_rows[0].days[1].attendance, "C缺卡");
+        let exception = &report.exception_rows[0];
+        assert_eq!(exception.missing_in, 1);
+        assert_eq!(exception.missing_out, 2);
+        assert_eq!(exception.score, 3.0);
+        assert_eq!(
+            exception.notes,
+            vec!["7.1上班未签到", "7.1下班未签退", "7.2下班未签退"]
+        );
     }
 
     #[test]
