@@ -394,7 +394,7 @@ pub fn calculate_attendance_with_config(
             .sum();
         let personal_process_hours = process_hours("事假");
         let compensatory_process_hours = process_hours("调休");
-        let sick_process_hours = process_hours("病假");
+        let sick_leave_hours = process_hours("病假");
         let breastfeeding_process_hours = process_hours("哺乳假");
         let marriage_process_hours = process_hours("婚假");
         let maternity_process_hours = process_hours("产假");
@@ -410,11 +410,6 @@ pub fn calculate_attendance_with_config(
             monthly.leave_summary_present.compensatory,
             monthly.compensatory_leave_hours,
             compensatory_process_hours,
-        );
-        let sick_leave_hours = summary_or_process_hours(
-            monthly.leave_summary_present.sick,
-            monthly.sick_leave_hours,
-            sick_process_hours,
         );
         let breastfeeding_leave_hours = summary_or_process_hours(
             monthly.leave_summary_present.breastfeeding,
@@ -453,10 +448,6 @@ pub fn calculate_attendance_with_config(
             (
                 "调休",
                 !monthly.leave_summary_present.compensatory && compensatory_process_hours > 0.001,
-            ),
-            (
-                "病假",
-                !monthly.leave_summary_present.sick && sick_process_hours > 0.001,
             ),
             (
                 "哺乳假",
@@ -2197,12 +2188,61 @@ mod tests {
         });
         let summary = &report.summary_rows[0];
         assert_eq!(summary.personal_leave_hours, 0.5);
-        assert_eq!(summary.sick_leave_hours, 0.5);
+        assert_eq!(summary.sick_leave_hours, 0.0);
         assert_eq!(summary.breastfeeding_leave_hours, 0.5);
         assert_eq!(summary.marriage_leave_hours, 0.5);
         assert_eq!(summary.maternity_leave_hours, 1.0);
         assert_eq!(summary.bereavement_leave_hours, 0.5);
-        assert_eq!(summary.actual_attendance_hours, Some(3.5));
+        assert_eq!(summary.actual_attendance_hours, Some(4.0));
+    }
+
+    #[test]
+    fn sick_leave_summary_matches_daily_details_across_months() {
+        for source_summary in [0.0, 8.0, 200.0] {
+            let mut monthly = empty_monthly_record();
+            monthly.sick_leave_hours = source_summary;
+            monthly.leave_summary_present.sick = true;
+            monthly.daily_results = (1..=30)
+                .map(|day| {
+                    if day <= 16 {
+                        "病假08-17 08:30到09-16 17:30 184小时".to_owned()
+                    } else {
+                        "病假09-17 08:30到10-10 17:30 104小时".to_owned()
+                    }
+                })
+                .collect();
+            let daily = (1..=30)
+                .map(|day| {
+                    let mut daily = overtime_daily(&format!("26-09-{day:02}"), 0.0);
+                    if holiday::is_workday(2026, 9, day) {
+                        daily.shift = "默认班次 08:30-17:30".to_owned();
+                    }
+                    daily
+                })
+                .collect();
+            let report = calculate_attendance(&AttendanceDataset {
+                period: crate::model::AttendancePeriod {
+                    year: 2026,
+                    month: 9,
+                },
+                monthly: vec![monthly],
+                daily,
+                invalid_punches: vec![],
+                employment_records: vec![],
+                annual_leave_records: vec![],
+            });
+            let detail = &report.detail_rows[0];
+            let daily_sick_hours: f64 = detail
+                .days
+                .iter()
+                .filter_map(|day| day.attendance.strip_prefix('△'))
+                .map(|hours| hours.parse::<f64>().unwrap())
+                .sum();
+            assert_eq!(daily_sick_hours, 176.0);
+            assert_eq!(detail.summary.sick_leave_hours, daily_sick_hours);
+            assert_eq!(report.summary_rows[0].sick_leave_hours, daily_sick_hours);
+            assert_eq!(detail.summary.actual_attendance_hours, Some(0.0));
+        }
     }
 
     #[test]
