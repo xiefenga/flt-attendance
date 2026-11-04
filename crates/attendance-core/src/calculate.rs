@@ -661,7 +661,7 @@ pub fn calculate_attendance_with_config(
         "本应出勤：一般人员按有效班次日 × 8 小时；不打卡人员按法定工作日 × 8 小时；六天制人员按周一至周六及配置的每日小时数计算。"
             .to_owned(),
         "出差天数：按月度汇总中的出差日期计。".to_owned(),
-        "不在范围内打卡：按原始记录中的“当前不在可打卡的时间范围”计。".to_owned(),
+        "不在范围内打卡：统计原始记录中的时间范围异常，以及无出差/外出流程的外勤打卡（排除已更新记录）。".to_owned(),
     ];
     if !leave_fallback_categories.is_empty() {
         let recovered = leave_fallback_categories
@@ -1157,7 +1157,7 @@ fn build_daily_attendance(
                 if daily.is_none() {
                     overtime_hours += extract_amount_before(part, "小时").unwrap_or(0.0);
                 }
-            } else if part.starts_with("出差") {
+            } else if part.starts_with("出差") || part.starts_with("外出") {
                 attendance = "C".to_owned();
             } else if leave_symbol(part).is_some() {
                 leave_processes
@@ -1392,10 +1392,22 @@ fn daily_irregular_mark(
     marks.join("")
 }
 
+fn has_travel_process(result: &str) -> bool {
+    result
+        .split([',', '，'])
+        .map(str::trim)
+        .any(|part| part.starts_with("出差") || part.starts_with("外出"))
+}
+
 fn missing_punch_counts(daily: &DailyRecord, attendance_result: &str) -> (u32, u32) {
     let mut missing_in = daily.missing_in_count.round().max(0.0) as u32;
     let mut missing_out = daily.missing_out_count.round().max(0.0) as u32;
-    if attendance_result.contains("出差") && is_scheduled_shift(&daily.shift) {
+    if has_travel_process(attendance_result)
+        && is_scheduled_shift(&daily.shift)
+        && daily.shift != "未排班"
+        && !attendance_result.contains("休息")
+        && !attendance_result.contains("未排班")
+    {
         let has_punch_or_leave = |kind| {
             daily.punch_slots.iter().any(|slot| {
                 slot.kind == kind
@@ -1450,6 +1462,18 @@ fn calculate_exceptions(
     daily_results: &[String],
     options: ExceptionOptions,
 ) -> (Option<ExceptionRow>, u32) {
+    let invalid_punches = invalid_punches
+        .iter()
+        .copied()
+        .filter(|punch| {
+            punch.result.contains("当前不在可打卡的时间范围")
+                || (punch.result.contains("外勤")
+                    && !punch.result.contains("此记录已被更新")
+                    && !day_from_date(&punch.attendance_date)
+                        .and_then(|day| daily_results.get(day.saturating_sub(1)))
+                        .is_some_and(|result| has_travel_process(result)))
+        })
+        .collect::<Vec<_>>();
     let mut row = ExceptionRow {
         employee_no: employee_no.to_owned(),
         name: name.to_owned(),
@@ -3074,93 +3098,197 @@ mod tests {
 
     #[test]
     fn travel_days_derive_missing_punches_when_dingtalk_reports_no_exception() {
-        let mut monthly = empty_monthly_record();
-        monthly.daily_results = vec![String::new(); 31];
-        monthly.daily_results[0] = "出差1天,事假07-01 08:30到07-01 09:00 0.5小时".to_owned();
-        monthly.daily_results[1] = "出差1天".to_owned();
-
-        let mut no_punches = meal_daily("08:30", "17:30", 0.0);
-        no_punches.punch_slots.clear();
-        let mut missing_out = meal_daily("08:30", "17:30", 0.0);
-        missing_out.date = "26-07-02 星期四".to_owned();
-        missing_out.punch_slots.truncate(1);
-
-        assert_eq!(missing_punch_counts(&no_punches, "正常"), (0, 0));
-        let report = calculate_attendance(&AttendanceDataset {
-            period: crate::model::AttendancePeriod {
-                year: 2026,
-                month: 7,
-            },
-            monthly: vec![monthly],
-            daily: vec![no_punches, missing_out],
-            invalid_punches: vec![],
-            employment_records: vec![],
-            annual_leave_records: vec![],
-        });
-
-        assert_eq!(report.detail_rows[0].days[0].attendance, "CO0.5缺卡");
-        assert_eq!(report.detail_rows[0].days[1].attendance, "C缺卡");
-        let exception = &report.exception_rows[0];
-        assert_eq!(exception.missing_in, 1);
-        assert_eq!(exception.missing_out, 2);
-        assert_eq!(exception.score, 3.0);
-        assert_eq!(
-            exception.notes,
-            vec!["7.1上班未签到", "7.1下班未签退", "7.2下班未签退"]
-        );
-    }
-
-    #[test]
-    fn travel_missing_punch_inference_respects_each_leave_slot() {
-        for (in_result, out_result, leave, mark, expected) in [
-            (
-                "请假",
-                "请假",
-                ",事假07-01 08:30到07-01 17:30 8小时",
-                "CO8",
-                (0, 0),
-            ),
-            (
-                "请假",
-                "出差",
-                ",事假07-01 08:30到07-01 12:00 3.5小时",
-                "CO3.5缺卡",
-                (0, 1),
-            ),
-            (
-                "出差",
-                "请假",
-                ",事假07-01 13:00到07-01 17:30 4.5小时",
-                "CO4.5缺卡",
-                (1, 0),
-            ),
-            ("出差", "出差", "", "C缺卡", (1, 1)),
-        ] {
-            let mut daily = meal_daily("", "", 0.0);
-            daily.punch_slots[0].result = in_result.to_owned();
-            daily.punch_slots[1].result = out_result.to_owned();
-            let result = format!("出差1天{leave}");
-            assert_eq!(missing_punch_counts(&daily, &result), expected);
+        for process in ["出差", "外出"] {
             let mut monthly = empty_monthly_record();
-            monthly.daily_results = vec![result.to_owned()];
+            monthly.daily_results = vec![String::new(); 31];
+            monthly.daily_results[0] = format!("{process}1天,事假07-01 08:30到07-01 09:00 0.5小时");
+            monthly.daily_results[1] = format!("{process}1天");
+
+            let mut no_punches = meal_daily("08:30", "17:30", 0.0);
+            no_punches.punch_slots.clear();
+            let mut missing_out = meal_daily("08:30", "17:30", 0.0);
+            missing_out.date = "26-07-02 星期四".to_owned();
+            missing_out.punch_slots.truncate(1);
+
+            assert_eq!(missing_punch_counts(&no_punches, "正常"), (0, 0));
             let report = calculate_attendance(&AttendanceDataset {
                 period: crate::model::AttendancePeriod {
                     year: 2026,
                     month: 7,
                 },
                 monthly: vec![monthly],
-                daily: vec![daily],
+                daily: vec![no_punches, missing_out],
                 invalid_punches: vec![],
                 employment_records: vec![],
                 annual_leave_records: vec![],
             });
-            assert_eq!(report.detail_rows[0].days[0].attendance, mark);
-            if expected == (0, 0) {
-                assert!(report.exception_rows.is_empty());
+
+            assert_eq!(report.detail_rows[0].days[0].attendance, "CO0.5缺卡");
+            assert_eq!(report.detail_rows[0].days[1].attendance, "C缺卡");
+            let exception = &report.exception_rows[0];
+            assert_eq!(exception.missing_in, 1);
+            assert_eq!(exception.missing_out, 2);
+            assert_eq!(exception.score, 3.0);
+            assert_eq!(
+                exception.notes,
+                vec!["7.1上班未签到", "7.1下班未签退", "7.2下班未签退"]
+            );
+        }
+    }
+
+    #[test]
+    fn travel_missing_punch_inference_respects_each_leave_slot() {
+        for process in ["出差", "外出"] {
+            for (in_result, out_result, leave, mark, expected) in [
+                (
+                    "请假",
+                    "请假",
+                    ",事假07-01 08:30到07-01 17:30 8小时",
+                    "CO8",
+                    (0, 0),
+                ),
+                (
+                    "请假",
+                    "出差",
+                    ",事假07-01 08:30到07-01 12:00 3.5小时",
+                    "CO3.5缺卡",
+                    (0, 1),
+                ),
+                (
+                    "出差",
+                    "请假",
+                    ",事假07-01 13:00到07-01 17:30 4.5小时",
+                    "CO4.5缺卡",
+                    (1, 0),
+                ),
+                ("出差", "出差", "", "C缺卡", (1, 1)),
+            ] {
+                let mut daily = meal_daily("", "", 0.0);
+                daily.punch_slots[0].result = in_result.to_owned();
+                daily.punch_slots[1].result = out_result.to_owned();
+                let result = format!("{process}1天{leave}");
+                assert_eq!(missing_punch_counts(&daily, &result), expected);
+                let mut monthly = empty_monthly_record();
+                monthly.daily_results = vec![result.to_owned()];
+                let report = calculate_attendance(&AttendanceDataset {
+                    period: crate::model::AttendancePeriod {
+                        year: 2026,
+                        month: 7,
+                    },
+                    monthly: vec![monthly],
+                    daily: vec![daily],
+                    invalid_punches: vec![],
+                    employment_records: vec![],
+                    annual_leave_records: vec![],
+                });
+                assert_eq!(report.detail_rows[0].days[0].attendance, mark);
+                if expected == (0, 0) {
+                    assert!(report.exception_rows.is_empty());
+                } else {
+                    let exception = &report.exception_rows[0];
+                    assert_eq!((exception.missing_in, exception.missing_out), expected);
+                    assert_eq!(exception.score, (expected.0 + expected.1) as f64);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn travel_missing_punches_respect_schedule_and_hire_day() {
+        for process in ["出差", "外出"] {
+            for (shift, prefix) in [
+                ("休息", ""),
+                ("", ""),
+                ("未排班", ""),
+                ("默认班次 08:30-17:30", "休息,"),
+                ("默认班次 08:30-17:30", "未排班,"),
+            ] {
+                let mut daily = meal_daily("", "", 0.0);
+                daily.shift = shift.to_owned();
+                let result = format!("{prefix}{process}1天");
+                assert_eq!(missing_punch_counts(&daily, &result), (0, 0));
+                assert_eq!(daily_irregular_mark(&daily, &result, false, false), "");
+                assert!(
+                    calculate_exceptions(
+                        "10001",
+                        "测试员工",
+                        "",
+                        &[&daily],
+                        &[],
+                        &[result],
+                        ExceptionOptions::default()
+                    )
+                    .0
+                    .is_none()
+                );
+            }
+            let daily = meal_daily("", "", 0.0);
+            let result = format!("{process}1天");
+            let exception = calculate_exceptions(
+                "10001",
+                "测试员工",
+                "",
+                &[&daily],
+                &[],
+                &[result.clone()],
+                ExceptionOptions {
+                    hire_day: Some(1),
+                    ..Default::default()
+                },
+            )
+            .0
+            .unwrap();
+            assert_eq!(
+                (exception.missing_in, exception.missing_out, exception.score),
+                (0, 1, 1.0)
+            );
+            assert_eq!(exception.notes, vec!["7.1下班未签退"]);
+            assert_eq!(daily_irregular_mark(&daily, &result, false, true), "缺卡");
+        }
+    }
+
+    #[test]
+    fn external_punches_require_a_travel_process_but_time_range_errors_always_count() {
+        for (result, process, count) in [
+            ("正常\n外勤", "正常", 1),
+            ("正常\n外勤", "事假4小时", 1),
+            ("正常\n外勤", "出差1天", 0),
+            ("外勤", "外出4小时", 0),
+            ("外勤", "正常，外出4小时", 0),
+            (
+                "打卡无效:外勤打卡待生效，外出、出差审批未提交或未通过",
+                "正常",
+                1,
+            ),
+            ("打卡无效:此记录已被更新\n外勤", "正常", 0),
+            ("当前不在可打卡的时间范围\n外勤", "出差1天", 1),
+            ("当前不在可打卡的时间范围\n外勤", "正常", 1),
+        ] {
+            let punch = crate::model::InvalidPunch {
+                employee_key: "10001".to_owned(),
+                employee_no: "10001".to_owned(),
+                name: "测试员工".to_owned(),
+                attendance_date: "26-07-01 星期三".to_owned(),
+                punch_time: "2026-07-01 08:30".to_owned(),
+                result: result.to_owned(),
+            };
+            let exception = calculate_exceptions(
+                "10001",
+                "测试员工",
+                "",
+                &[],
+                &[&punch],
+                &[process.to_owned()],
+                ExceptionOptions::default(),
+            )
+            .0;
+            if count == 0 {
+                assert!(exception.is_none());
             } else {
-                let exception = &report.exception_rows[0];
-                assert_eq!((exception.missing_in, exception.missing_out), expected);
-                assert_eq!(exception.score, (expected.0 + expected.1) as f64);
+                let exception = exception.unwrap();
+                assert_eq!(exception.out_of_range, count);
+                assert_eq!(exception.score, count as f64);
+                assert_eq!(exception.notes, vec!["7.1不在范围内打卡"]);
             }
         }
     }

@@ -34,7 +34,14 @@ fn parses_and_reconciles_real_dingtalk_export() {
     assert_eq!(dataset.period, summary.period);
     assert_eq!(dataset.monthly.len(), 236);
     assert_eq!(dataset.daily.len(), 7_316);
-    assert_eq!(dataset.invalid_punches.len(), 16);
+    assert_eq!(
+        dataset
+            .invalid_punches
+            .iter()
+            .filter(|punch| punch.result.contains("当前不在可打卡的时间范围"))
+            .count(),
+        16
+    );
     assert_eq!(dataset.employment_records.len(), 44);
     assert!(dataset.annual_leave_records.is_empty());
     assert!(summary.sheet("年假信息").is_none());
@@ -80,7 +87,7 @@ fn parses_and_reconciles_real_dingtalk_export() {
         .sum();
 
     assert_eq!(report.summary_rows.len(), 236);
-    assert_eq!(report.exception_rows.len(), 51);
+    assert_eq!(report.exception_rows.len(), 61);
     for (employee_no, minutes) in [("25205", 10), ("24165", 8)] {
         let exception = report
             .exception_rows
@@ -181,7 +188,17 @@ fn parses_and_reconciles_real_dingtalk_export() {
         let detail_travel_days = row
             .days
             .iter()
-            .filter(|day| day.attendance.starts_with('C'))
+            .enumerate()
+            .filter(|(index, day)| {
+                day.attendance.starts_with('C')
+                    && dataset
+                        .monthly
+                        .iter()
+                        .find(|monthly| {
+                            monthly.employee_no == row.employee_no && monthly.name == row.name
+                        })
+                        .is_some_and(|monthly| monthly.daily_results[*index].contains("出差"))
+            })
             .count() as f64;
         assert_eq!(
             detail_travel_days, row.summary.travel_days,

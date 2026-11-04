@@ -557,7 +557,9 @@ fn parse_invalid_punches(range: &calamine::Range<Data>) -> Vec<InvalidPunch> {
         .skip(3)
         .filter_map(|row| {
             let result = cell_text(row.get(9));
-            if !result.contains("当前不在可打卡的时间范围") {
+            if !result.contains("当前不在可打卡的时间范围")
+                && (!result.contains("外勤") || result.contains("此记录已被更新"))
+            {
                 return None;
             }
             let employee_no = cell_text(row.get(3));
@@ -761,6 +763,35 @@ mod tests {
             Err(DingtalkError::MissingSheet(_))
         ));
         std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn raw_punch_candidates_include_external_but_not_superseded_records() {
+        let mut range = calamine::Range::new((0, 0), (7, 9));
+        for (index, result) in [
+            "正常",
+            "正常\n外勤",
+            "打卡无效:外勤打卡待生效",
+            "外勤\n打卡无效:此记录已被更新",
+            "当前不在可打卡的时间范围",
+        ]
+        .iter()
+        .enumerate()
+        {
+            range.set_value((index as u32 + 3, 9), Data::String((*result).to_owned()));
+        }
+        let records = parse_invalid_punches(&range);
+        assert_eq!(
+            records
+                .iter()
+                .map(|row| row.result.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "正常\n外勤",
+                "打卡无效:外勤打卡待生效",
+                "当前不在可打卡的时间范围"
+            ]
+        );
     }
 
     #[test]
