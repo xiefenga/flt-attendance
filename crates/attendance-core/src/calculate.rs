@@ -1306,6 +1306,37 @@ fn flexible_arrival_irregular_minutes(daily: &DailyRecord, attendance_result: &s
     (early_minutes > 0).then_some(early_minutes)
 }
 
+fn regular_late_minutes(daily: &DailyRecord, attendance_result: &str) -> Option<u32> {
+    if !is_scheduled_shift(&daily.shift)
+        || attendance_result.contains("休息")
+        || attendance_result.contains("未排班")
+    {
+        return None;
+    }
+    let has_process = attendance_result
+        .split([',', '，'])
+        .map(str::trim)
+        .any(|part| {
+            leave_symbol(part).is_some()
+                || part.starts_with("例假")
+                || part.starts_with("请假")
+                || part.starts_with("外出")
+                || part.starts_with("出差")
+        });
+    let expected = if has_process {
+        extract_clock_minutes(&daily.shift).first().copied()?
+    } else {
+        8 * 60 + 30
+    };
+    daily
+        .punch_slots
+        .iter()
+        .filter(|slot| slot.kind == PunchKind::In && (!has_process || slot.result == "迟到"))
+        .filter_map(|slot| parse_punch_minutes(&slot.time))
+        .min()
+        .map(|arrival| arrival.saturating_sub(expected))
+}
+
 fn daily_irregular_mark(
     daily: &DailyRecord,
     attendance_result: &str,
@@ -1334,14 +1365,18 @@ fn daily_irregular_mark(
         }
     });
     let mut marks = Vec::new();
+    if !ignores_in_exception {
+        if let Some(minutes) =
+            regular_late_minutes(daily, attendance_result).filter(|value| *value > 0)
+        {
+            marks.push(format!("D{minutes}"));
+        }
+    }
     for slot in &daily.punch_slots {
         if ignores_in_exception && slot.kind == PunchKind::In {
             continue;
         }
         let value = match (slot.kind, slot.result.as_str()) {
-            (PunchKind::In, "迟到") => expected_start.and_then(|expected| {
-                parse_punch_minutes(&slot.time).map(|actual| ("D", actual.saturating_sub(expected)))
-            }),
             (PunchKind::Out, "早退") => expected_end.and_then(|expected| {
                 parse_punch_minutes(&slot.time).map(|actual| ("Z", expected.saturating_sub(actual)))
             }),
@@ -1482,6 +1517,22 @@ fn calculate_exceptions(
             continue;
         }
 
+        if !ignores_in_exception {
+            match regular_late_minutes(daily, attendance_result) {
+                Some(minutes) if minutes > 0 => {
+                    classify_minutes(&mut row, &mut under_10_notes, minutes, &date, PunchKind::In)
+                }
+                None if daily
+                    .punch_slots
+                    .iter()
+                    .any(|slot| slot.kind == PunchKind::In && slot.result == "迟到") =>
+                {
+                    unclassified += 1
+                }
+                _ => {}
+            }
+        }
+
         let expected_times = extract_clock_minutes(&daily.shift);
         let expected_start = expected_times.first().copied();
         let expected_end = expected_times.get(1).copied().map(|end| {
@@ -1497,9 +1548,6 @@ fn calculate_exceptions(
                 continue;
             }
             let minutes = match (slot.kind, slot.result.as_str()) {
-                (PunchKind::In, "迟到") => expected_start.and_then(|expected| {
-                    parse_punch_minutes(&slot.time).map(|actual| actual.saturating_sub(expected))
-                }),
                 (PunchKind::Out, "早退") => expected_end.and_then(|expected| {
                     parse_punch_minutes(&slot.time).map(|actual| expected.saturating_sub(actual))
                 }),
@@ -2786,6 +2834,75 @@ mod tests {
     }
 
     #[test]
+    fn unlabelled_lateness_uses_first_arrival_and_preserves_exemptions() {
+        for (time, minutes) in [
+            ("08:29", 0),
+            ("08:30", 0),
+            ("08:31", 1),
+            ("08:40", 10),
+            ("08:41", 11),
+        ] {
+            for label in ["正常", "外勤", "", "迟到"] {
+                let mut daily = meal_daily(time, "17:30", 0.0);
+                daily.punch_slots[0].result = label.to_owned();
+                assert_eq!(regular_late_minutes(&daily, "正常"), Some(minutes));
+                let mark = daily_irregular_mark(&daily, "正常", false, false);
+                assert_eq!(
+                    mark,
+                    if minutes > 0 {
+                        format!("D{minutes}")
+                    } else {
+                        String::new()
+                    }
+                );
+                let (exception, unclassified) = calculate_exceptions(
+                    "10001",
+                    "测试员工",
+                    "人事行政部",
+                    &[&daily],
+                    &[],
+                    &[],
+                    ExceptionOptions::default(),
+                );
+                assert_eq!(unclassified, 0);
+                assert_eq!(exception.is_some(), minutes > 0);
+                assert_eq!(daily_irregular_mark(&daily, "正常", false, true), "");
+                assert_eq!(
+                    daily_irregular_mark(&daily, "正常", true, false),
+                    if minutes > 0 { "Z30" } else { "" }
+                );
+            }
+        }
+        let mut daily = meal_daily("08:39", "17:30", 0.0);
+        for process in [
+            "事假07-01 4小时",
+            "例假1天",
+            "调休4小时",
+            "请假",
+            "外出07-01 4小时",
+            "出差1天",
+            "正常，年假4小时",
+        ] {
+            assert_eq!(regular_late_minutes(&daily, process), None);
+        }
+        daily.punch_slots[0].result = "迟到".to_owned();
+        assert_eq!(regular_late_minutes(&daily, "事假07-01 4小时"), Some(9));
+        daily.punch_slots.push(crate::model::PunchSlot {
+            kind: PunchKind::In,
+            time: "13:00".to_owned(),
+            result: "正常".to_owned(),
+        });
+        assert_eq!(daily_irregular_mark(&daily, "正常", false, false), "D9");
+        daily.shift = "休息".to_owned();
+        assert_eq!(regular_late_minutes(&daily, "正常"), None);
+        daily.shift.clear();
+        assert_eq!(regular_late_minutes(&daily, "正常"), None);
+        daily.shift = "默认班次 08:30-17:30".to_owned();
+        daily.punch_slots.clear();
+        assert_eq!(regular_late_minutes(&daily, "正常"), None);
+    }
+
+    #[test]
     fn flexible_arrival_shift_uses_0830_boundary_without_late_mark() {
         let boundary = flexible_daily("08:30", "17:30");
         assert_eq!(daily_irregular_mark(&boundary, "", true, false), "");
@@ -2874,11 +2991,11 @@ mod tests {
 
     #[test]
     fn non_hr_department_exempts_first_two_under_10_events_each_month() {
-        let mut first = flexible_daily("08:35", "17:30");
+        let mut first = meal_daily("08:35", "17:30", 0.0);
         first.date = "26-07-01 星期三".to_owned();
-        let mut second = flexible_daily("08:36", "17:30");
+        let mut second = meal_daily("08:36", "17:30", 0.0);
         second.date = "26-07-02 星期四".to_owned();
-        let mut third = flexible_daily("08:37", "17:30");
+        let mut third = meal_daily("08:37", "17:30", 0.0);
         third.date = "26-07-03 星期五".to_owned();
 
         let first_two = calculate_exceptions(
@@ -2910,9 +3027,9 @@ mod tests {
 
     #[test]
     fn hr_department_does_not_exempt_under_10_events() {
-        let mut first = flexible_daily("08:35", "17:30");
+        let mut first = meal_daily("08:35", "17:30", 0.0);
         first.date = "26-07-01 星期三".to_owned();
-        let mut second = flexible_daily("08:36", "17:30");
+        let mut second = meal_daily("08:36", "17:30", 0.0);
         second.date = "26-07-02 星期四".to_owned();
 
         let exception = calculate_exceptions(

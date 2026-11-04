@@ -80,7 +80,22 @@ fn parses_and_reconciles_real_dingtalk_export() {
         .sum();
 
     assert_eq!(report.summary_rows.len(), 236);
-    assert_eq!(report.exception_rows.len(), 49);
+    assert_eq!(report.exception_rows.len(), 51);
+    for (employee_no, minutes) in [("25205", 10), ("24165", 8)] {
+        let exception = report
+            .exception_rows
+            .iter()
+            .find(|row| row.employee_no == employee_no)
+            .unwrap();
+        assert_eq!(exception.late_or_early_under_10, 1);
+        assert_eq!(exception.notes, vec![format!("7.20迟到{minutes}分钟")]);
+        let detail = report
+            .detail_rows
+            .iter()
+            .find(|row| row.employee_no == employee_no)
+            .unwrap();
+        assert_eq!(detail.days[19].attendance, format!("√D{minutes}"));
+    }
     for (employee_no, day) in [
         ("24149", 17),
         ("23040", 9),
@@ -113,7 +128,16 @@ fn parses_and_reconciles_real_dingtalk_export() {
         .expect("张丽雯出差日缺少下班卡，应进入异常表");
     assert_eq!(zhang_liwen_exception.missing_in, 0);
     assert_eq!(zhang_liwen_exception.missing_out, 1);
-    assert_eq!(zhang_liwen_exception.notes, vec!["7.23下班未签退"]);
+    assert!(
+        zhang_liwen_exception
+            .notes
+            .contains(&"7.23下班未签退".to_owned())
+    );
+    assert!(
+        zhang_liwen_exception
+            .notes
+            .contains(&"7.1迟到46分钟".to_owned())
+    );
     assert!(report_weekday_overtime <= source_weekday_overtime);
     assert!(report_weekend_overtime <= source_weekend_overtime);
     assert!(
