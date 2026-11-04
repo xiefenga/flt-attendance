@@ -31,6 +31,8 @@ pub struct DetailRow {
 pub struct DailyAttendance {
     pub attendance: String,
     pub overtime_hours: f64,
+    pub attendance_meal_count: f64,
+    pub overtime_meal_count: f64,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -491,7 +493,7 @@ pub fn calculate_attendance_with_config(
         let expected_attendance_hours = expected_days * standard_daily_hours;
         let normal_attendance_hours =
             (expected_attendance_hours - leave_hours - absent_hours).max(0.0);
-        let (attendance_meal_count, overtime_meal_count) = calculate_meal_allowance(
+        let daily_meals = calculate_meal_allowance(
             monthly,
             &active_daily_records,
             dataset.period.year,
@@ -510,6 +512,12 @@ pub fn calculate_attendance_with_config(
             uses_six_day_schedule,
             employment,
         );
+        for (day, (attendance_meals, overtime_meals)) in days.iter_mut().zip(daily_meals) {
+            day.attendance_meal_count = attendance_meals;
+            day.overtime_meal_count = overtime_meals;
+        }
+        let attendance_meal_count = days.iter().map(|day| day.attendance_meal_count).sum();
+        let overtime_meal_count = days.iter().map(|day| day.overtime_meal_count).sum();
         let has_daily_overtime = days.iter().any(|day| day.overtime_hours > 0.0)
             || active_daily_records
                 .iter()
@@ -843,28 +851,31 @@ fn calculate_meal_allowance(
     policy: MealPolicy,
     uses_flexible_arrival_shift: bool,
     employment: Option<&EmploymentRecord>,
-) -> (f64, f64) {
+) -> Vec<(f64, f64)> {
+    let mut meals = vec![(0.0, 0.0); days_in_month(year, month)];
     if policy == MealPolicy::None {
-        return (0.0, 0.0);
+        return meals;
     }
     if policy == MealPolicy::ScheduledWithoutPunch {
-        let workdays = (1..=days_in_month(year, month))
-            .filter(|day| {
-                holiday::is_workday(year, month, *day as u8)
-                    && is_active_day(employment, year, month, *day)
-                    && monthly
-                        .daily_results
-                        .get(*day - 1)
-                        .is_none_or(|result| !result.contains("出差"))
-            })
-            .count();
-        return (workdays as f64, 0.0);
+        for (index, meal) in meals.iter_mut().enumerate() {
+            let day = index + 1;
+            if holiday::is_workday(year, month, day as u8)
+                && is_active_day(employment, year, month, day)
+                && monthly
+                    .daily_results
+                    .get(index)
+                    .is_none_or(|result| !result.contains("出差"))
+            {
+                meal.0 = 1.0;
+            }
+        }
+        return meals;
     }
 
     let hire_day_meal = employment
         .and_then(|record| record.hire_date)
         .filter(|date| date.year == year && date.month == month)
-        .is_some_and(|date| {
+        .filter(|date| {
             policy == MealPolicy::Regular
                 && holiday::is_workday(year, month, date.day)
                 && monthly
@@ -872,8 +883,9 @@ fn calculate_meal_allowance(
                     .get(date.day as usize - 1)
                     .is_none_or(|result| !result.contains("出差") && !result.contains("居家办公"))
         });
-    let mut attendance_meals = u32::from(hire_day_meal);
-    let mut overtime_meals = 0_u32;
+    if let Some(date) = hire_day_meal {
+        meals[date.day as usize - 1].0 = 1.0;
+    }
     for daily in daily_records {
         let Some(day) = day_from_date(&daily.date) else {
             continue;
@@ -886,7 +898,7 @@ fn calculate_meal_allowance(
             .get(day - 1)
             .map(String::as_str)
             .unwrap_or("");
-        if result.contains("出差") {
+        if !is_active_day(employment, year, month, day) || result.contains("出差") {
             continue;
         }
         let is_workday = holiday::is_workday(year, month, day as u8);
@@ -896,24 +908,24 @@ fn calculate_meal_allowance(
             if !is_hire_day(employment, year, month, day)
                 && workday_attendance_meal(result, punches)
             {
-                attendance_meals += 1;
+                meals[day - 1].0 += 1.0;
             }
-            overtime_meals += workday_overtime_meals(
+            meals[day - 1].1 += workday_overtime_meals(
                 daily,
                 punches,
                 overtime_application_ranges(result, year, month, day as u8).as_deref(),
                 policy == MealPolicy::PunchOnly,
                 uses_flexible_arrival_shift,
-            );
+            ) as f64;
         } else {
-            overtime_meals += off_day_overtime_meals(
+            meals[day - 1].1 += off_day_overtime_meals(
                 punches,
                 daily.overtime_hours,
                 policy == MealPolicy::PunchOnly,
-            );
+            ) as f64;
         }
     }
-    (attendance_meals as f64, overtime_meals as f64)
+    meals
 }
 
 fn workday_attendance_meal(result: &str, punches: Option<(u32, u32)>) -> bool {
@@ -1131,6 +1143,8 @@ fn build_daily_attendance(
             cells.push(DailyAttendance {
                 attendance: String::new(),
                 overtime_hours: 0.0,
+                attendance_meal_count: 0.0,
+                overtime_meal_count: 0.0,
             });
             continue;
         }
@@ -1191,6 +1205,8 @@ fn build_daily_attendance(
         cells.push(DailyAttendance {
             attendance,
             overtime_hours,
+            attendance_meal_count: 0.0,
+            overtime_meal_count: 0.0,
         });
     }
 
@@ -2035,6 +2051,15 @@ fn display_date(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn total_meals(meals: Vec<(f64, f64)>) -> (f64, f64) {
+        meals.into_iter().fold(
+            (0.0, 0.0),
+            |(attendance, overtime), (day_attendance, day_overtime)| {
+                (attendance + day_attendance, overtime + day_overtime)
+            },
+        )
+    }
 
     fn flexible_daily(arrival: &str, departure: &str) -> DailyRecord {
         DailyRecord {
@@ -3418,7 +3443,7 @@ mod tests {
                         (0.0, 3.0)
                     };
                     assert_eq!(
-                        calculate_meal_allowance(
+                        total_meals(calculate_meal_allowance(
                             &monthly,
                             &[&daily],
                             2026,
@@ -3426,13 +3451,98 @@ mod tests {
                             policy,
                             false,
                             None,
-                        ),
+                        )),
                         expected,
                         "{month}-{day} {policy:?} {result}"
                     );
                 }
             }
         }
+    }
+
+    #[test]
+    fn daily_meals_keep_dates_and_special_policy_rules() {
+        let mut monthly = empty_monthly_record();
+        monthly.daily_results = vec![String::new(); 31];
+        monthly.daily_results[1] = "出差1天".to_owned();
+        let mut first = meal_daily("08:30", "19:30", 2.0);
+        first.date = "26-07-01".to_owned();
+        let mut travel = first.clone();
+        travel.date = "26-07-02".to_owned();
+        let mut weekend = first.clone();
+        weekend.date = "26-07-04".to_owned();
+        weekend.overtime_hours = 8.0;
+        let records = [&weekend, &travel, &first];
+        for policy in [MealPolicy::Regular, MealPolicy::PunchOnly] {
+            let meals = calculate_meal_allowance(&monthly, &records, 2026, 7, policy, false, None);
+            assert_eq!(meals.len(), 31);
+            assert_eq!(
+                &meals[..4],
+                &[(1.0, 1.0), (0.0, 0.0), (0.0, 0.0), (0.0, 2.0)]
+            );
+        }
+        let employment = EmploymentRecord {
+            employee_no: "10001".to_owned(),
+            name: "测试员工".to_owned(),
+            company: String::new(),
+            hire_date: Some(CalendarDate {
+                year: 2026,
+                month: 7,
+                day: 3,
+            }),
+            termination_date: Some(CalendarDate {
+                year: 2026,
+                month: 7,
+                day: 6,
+            }),
+        };
+        let meals = calculate_meal_allowance(
+            &monthly,
+            &records,
+            2026,
+            7,
+            MealPolicy::Regular,
+            false,
+            Some(&employment),
+        );
+        assert_eq!(
+            &meals[..7],
+            &[
+                (0.0, 0.0),
+                (0.0, 0.0),
+                (1.0, 0.0),
+                (0.0, 2.0),
+                (0.0, 0.0),
+                (0.0, 0.0),
+                (0.0, 0.0)
+            ]
+        );
+        let scheduled = calculate_meal_allowance(
+            &monthly,
+            &[],
+            2026,
+            7,
+            MealPolicy::ScheduledWithoutPunch,
+            false,
+            Some(&employment),
+        );
+        assert_eq!(
+            &scheduled[..7],
+            &[
+                (0.0, 0.0),
+                (0.0, 0.0),
+                (1.0, 0.0),
+                (0.0, 0.0),
+                (0.0, 0.0),
+                (1.0, 0.0),
+                (0.0, 0.0)
+            ]
+        );
+        assert!(
+            calculate_meal_allowance(&monthly, &records, 2026, 7, MealPolicy::None, false, None)
+                .iter()
+                .all(|meal| *meal == (0.0, 0.0))
+        );
     }
 
     #[test]
@@ -3552,7 +3662,7 @@ mod tests {
             ));
         }
         assert_eq!(
-            calculate_meal_allowance(
+            total_meals(calculate_meal_allowance(
                 &monthly,
                 &daily.iter().collect::<Vec<_>>(),
                 2026,
@@ -3560,7 +3670,7 @@ mod tests {
                 MealPolicy::Regular,
                 false,
                 None,
-            ),
+            )),
             (7.0, 11.0)
         );
     }
@@ -3646,7 +3756,7 @@ mod tests {
             daily_results: vec![],
         };
         assert_eq!(
-            calculate_meal_allowance(
+            total_meals(calculate_meal_allowance(
                 &monthly,
                 &[],
                 2026,
@@ -3654,7 +3764,7 @@ mod tests {
                 MealPolicy::ScheduledWithoutPunch,
                 false,
                 None,
-            ),
+            )),
             (23.0, 0.0)
         );
 
@@ -3670,7 +3780,7 @@ mod tests {
             termination_date: None,
         };
         assert_eq!(
-            calculate_meal_allowance(
+            total_meals(calculate_meal_allowance(
                 &monthly,
                 &[],
                 2026,
@@ -3678,12 +3788,12 @@ mod tests {
                 MealPolicy::Regular,
                 false,
                 Some(&employment),
-            ),
+            )),
             (1.0, 0.0),
             "入职当天即使没有有效打卡记录也应记出勤餐补"
         );
         assert_eq!(
-            calculate_meal_allowance(
+            total_meals(calculate_meal_allowance(
                 &monthly,
                 &[],
                 2026,
@@ -3691,7 +3801,7 @@ mod tests {
                 MealPolicy::ScheduledWithoutPunch,
                 false,
                 Some(&employment),
-            ),
+            )),
             (10.0, 0.0),
             "不打卡人员应按在职区间内的法定工作日记出勤餐补"
         );

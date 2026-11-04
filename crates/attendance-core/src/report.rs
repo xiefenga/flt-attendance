@@ -190,7 +190,7 @@ fn write_detail_sheet(
     month: u8,
 ) -> Result<(), XlsxError> {
     let day_count = days_in_month(year, month);
-    let summary_start = 5 + day_count as u16;
+    let summary_start = 5 + day_count as u16 * 2;
     let last_column = summary_start + DETAIL_SUMMARY_HEADERS.len() as u16 - 1;
     let title = Format::new()
         .set_font_name("宋体")
@@ -247,7 +247,7 @@ fn write_detail_sheet(
         sheet.set_column_width(column, width)?;
     }
     for day in 1..=day_count {
-        let column = 4 + day as u16;
+        let column = 5 + (day as u16 - 1) * 2;
         let off_day = is_off_day(year, month, day as u8);
         let day_format = if off_day { &weekend_header } else { &header };
         sheet.write_number_with_format(2, column, day as f64, day_format)?;
@@ -258,6 +258,8 @@ fn write_detail_sheet(
             day_format,
         )?;
         sheet.set_column_width(column, 3.6)?;
+        sheet.merge_range(2, column + 1, 3, column + 1, "餐补", day_format)?;
+        sheet.set_column_width(column + 1, 3.6)?;
     }
     for (offset, value) in DETAIL_SUMMARY_HEADERS.iter().enumerate() {
         let column = summary_start + offset as u16;
@@ -286,7 +288,7 @@ fn write_detail_sheet(
         sheet.write_string_with_format(overtime_row, 4, "加班", &body)?;
 
         for day_index in 0..day_count {
-            let column = 5 + day_index as u16;
+            let column = 5 + day_index as u16 * 2;
             let day = (day_index + 1) as u8;
             let off_day = if row.works_saturdays {
                 !holiday::is_six_day_workday(year, month, day)
@@ -306,9 +308,25 @@ fn write_detail_sheet(
                     )?;
                 }
                 write_number_or_blank(sheet, overtime_row, column, day.overtime_hours, day_format)?;
+                write_number_or_blank(
+                    sheet,
+                    attendance_row,
+                    column + 1,
+                    day.attendance_meal_count,
+                    day_format,
+                )?;
+                write_number_or_blank(
+                    sheet,
+                    overtime_row,
+                    column + 1,
+                    day.overtime_meal_count,
+                    day_format,
+                )?;
             } else {
                 sheet.write_blank(attendance_row, column, day_format)?;
                 sheet.write_blank(overtime_row, column, day_format)?;
+                sheet.write_blank(attendance_row, column + 1, day_format)?;
+                sheet.write_blank(overtime_row, column + 1, day_format)?;
             }
         }
         write_detail_totals(
@@ -328,6 +346,7 @@ fn write_detail_sheet(
         "2.迟到、早退以分钟为单位，请假和加班以小时为单位。",
         "3.单独的“√”代表正常出勤；加班写在加班行；请假符号后的数字为当日小时数。",
         "4.公休日使用灰色底纹标记。",
+        "5.每日餐补列：出勤行记录出勤餐补次数，加班行记录加班餐补次数，空白表示0次；逐日合计与月末餐补一致。",
     ]
     .iter()
     .enumerate()
@@ -646,6 +665,41 @@ fn write_optional_number(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn daily_meal_headers_follow_month_length() {
+        use calamine::{DataType, Reader, open_workbook_auto};
+        for (year, month, days) in [(2026, 2, 28), (2028, 2, 29), (2026, 4, 30), (2026, 7, 31)] {
+            let path = std::env::temp_dir().join(format!(
+                "flt-attendance-meal-layout-{}-{year}-{month}.xlsx",
+                std::process::id()
+            ));
+            generate_report_skeleton(&path, year, month).unwrap();
+            let mut workbook = open_workbook_auto(&path).unwrap();
+            let range = workbook.worksheet_range("考勤明细").unwrap();
+            assert_eq!(range.width(), 5 + days * 2 + DETAIL_SUMMARY_HEADERS.len());
+            let last_day_column = 5 + (days as u32 - 1) * 2;
+            assert_eq!(
+                range
+                    .get_value((2, last_day_column))
+                    .and_then(DataType::as_f64),
+                Some(days as f64)
+            );
+            assert_eq!(
+                range
+                    .get_value((2, last_day_column + 1))
+                    .and_then(DataType::get_string),
+                Some("餐补")
+            );
+            assert_eq!(
+                range
+                    .get_value((2, last_day_column + 3))
+                    .and_then(DataType::get_string),
+                Some("餐补次数")
+            );
+            std::fs::remove_file(path).unwrap();
+        }
+    }
 
     #[test]
     fn headers_have_expected_width() {

@@ -176,6 +176,20 @@ fn parses_and_reconciles_real_dingtalk_export() {
         "真实样例的餐补合计不应全部为空或为零"
     );
     for row in &report.detail_rows {
+        assert_eq!(
+            row.days
+                .iter()
+                .map(|day| day.attendance_meal_count)
+                .sum::<f64>(),
+            row.summary.attendance_meal_count
+        );
+        assert_eq!(
+            row.days
+                .iter()
+                .map(|day| day.overtime_meal_count)
+                .sum::<f64>(),
+            row.summary.overtime_meal_count
+        );
         let daily_overtime: f64 = row.days.iter().map(|day| day.overtime_hours).sum();
         let summary_overtime = row.summary.weekday_overtime_hours
             + row.summary.weekend_overtime_hours
@@ -434,4 +448,70 @@ fn parses_and_reconciles_real_dingtalk_export() {
             .iter()
             .any(|row| row.employee_no == "25181")
     );
+}
+
+#[test]
+fn exported_daily_meal_columns_match_calculation_and_monthly_totals() {
+    use calamine::{DataType, Reader, open_workbook_auto};
+    let dataset = load_dingtalk(fixture_path()).unwrap();
+    let report = calculate_attendance(&dataset);
+    let path = std::env::temp_dir().join(format!(
+        "flt-attendance-daily-meals-{}.xlsx",
+        std::process::id()
+    ));
+    attendance_core::generate_attendance_report(&report, &path, 2026, 7).unwrap();
+    let mut workbook = open_workbook_auto(&path).unwrap();
+    let detail = workbook.worksheet_range("考勤明细").unwrap();
+    let summary = workbook.worksheet_range("考勤汇总表").unwrap();
+    assert_eq!(detail.width(), 5 + 31 * 2 + 18);
+    for (index, row) in report.detail_rows.iter().enumerate() {
+        let attendance_row = 4 + index as u32 * 2;
+        for (day_index, day) in row.days.iter().enumerate() {
+            let column = 5 + day_index as u32 * 2;
+            assert_eq!(
+                detail.get_value((2, column)).and_then(DataType::as_f64),
+                Some((day_index + 1) as f64)
+            );
+            assert_eq!(
+                detail
+                    .get_value((2, column + 1))
+                    .and_then(DataType::get_string),
+                Some("餐补")
+            );
+            for (offset, meals) in [(0, day.attendance_meal_count), (1, day.overtime_meal_count)] {
+                assert_eq!(
+                    detail
+                        .get_value((attendance_row + offset, column + 1))
+                        .and_then(DataType::as_f64)
+                        .unwrap_or(0.0),
+                    meals
+                );
+            }
+            assert_eq!(
+                detail
+                    .get_value((attendance_row + 1, column))
+                    .and_then(DataType::as_f64)
+                    .unwrap_or(0.0),
+                day.overtime_hours
+            );
+        }
+        for (offset, meals) in [
+            (0, row.summary.attendance_meal_count),
+            (1, row.summary.overtime_meal_count),
+        ] {
+            assert_eq!(
+                detail
+                    .get_value((attendance_row + offset, 67))
+                    .and_then(DataType::as_f64),
+                Some(meals)
+            );
+        }
+        assert_eq!(
+            summary
+                .get_value((index as u32 + 2, 3))
+                .and_then(DataType::as_f64),
+            row.summary.meal_allowance_count
+        );
+    }
+    std::fs::remove_file(path).unwrap();
 }
