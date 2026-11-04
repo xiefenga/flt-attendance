@@ -21,6 +21,8 @@ pub enum DingtalkError {
     Open(#[from] calamine::Error),
     #[error("钉钉工作簿缺少工作表：{0}")]
     MissingSheet(String),
+    #[error("去除前后空白后存在重名工作表：{0}")]
+    AmbiguousSheet(String),
     #[error("工作表 {sheet} 缺少必需字段：{missing}")]
     MissingHeaders { sheet: String, missing: String },
     #[error("每日统计表中没有有效的考勤日期")]
@@ -59,13 +61,19 @@ pub struct EmployeeIdentity {
 
 impl WorkbookSummary {
     pub fn sheet(&self, name: &str) -> Option<&WorksheetSummary> {
-        self.sheets.iter().find(|sheet| sheet.name == name)
+        self.sheets
+            .iter()
+            .find(|sheet| sheet.name.trim() == name.trim())
     }
 }
 
 pub fn inspect_dingtalk(path: impl AsRef<Path>) -> Result<WorkbookSummary, DingtalkError> {
     let mut workbook = open_workbook_auto(path)?;
-    let available: BTreeSet<String> = workbook.sheet_names().iter().cloned().collect();
+    let available: BTreeSet<String> = workbook
+        .sheet_names()
+        .iter()
+        .map(|name| name.trim().to_owned())
+        .collect();
 
     for required in REQUIRED_SHEETS {
         if !available.contains(required) {
@@ -86,7 +94,7 @@ pub fn inspect_dingtalk(path: impl AsRef<Path>) -> Result<WorkbookSummary, Dingt
     let mut employee_list = Vec::new();
     let mut period = None;
     for sheet_name in inspected_sheets {
-        let range = workbook.worksheet_range(sheet_name)?;
+        let range = worksheet_range(&mut workbook, sheet_name)?;
         validate_headers(sheet_name, &range)?;
         if sheet_name == "每日统计" {
             period = Some(read_period(&range)?);
@@ -149,16 +157,16 @@ pub fn load_dingtalk(path: impl AsRef<Path>) -> Result<AttendanceDataset, Dingta
     let mut workbook = open_workbook_auto(path)?;
     validate_required_sheets(&workbook)?;
 
-    let monthly_range = workbook.worksheet_range("月度汇总")?;
+    let monthly_range = worksheet_range(&mut workbook, "月度汇总")?;
     validate_headers("月度汇总", &monthly_range)?;
     let monthly = parse_monthly(&monthly_range);
 
-    let daily_range = workbook.worksheet_range("每日统计")?;
+    let daily_range = worksheet_range(&mut workbook, "每日统计")?;
     validate_headers("每日统计", &daily_range)?;
     let period = read_period(&daily_range)?;
     let daily = parse_daily(&daily_range);
 
-    let raw_range = workbook.worksheet_range("原始记录")?;
+    let raw_range = worksheet_range(&mut workbook, "原始记录")?;
     validate_headers("原始记录", &raw_range)?;
     let invalid_punches = parse_invalid_punches(&raw_range);
     let employment_records = parse_employment_records(&mut workbook)?;
@@ -183,12 +191,12 @@ where
     if !workbook
         .sheet_names()
         .iter()
-        .any(|name| name == ANNUAL_LEAVE_SHEET)
+        .any(|name| name.trim() == ANNUAL_LEAVE_SHEET)
     {
         return Ok(Vec::new());
     }
 
-    let range = workbook.worksheet_range(ANNUAL_LEAVE_SHEET)?;
+    let range = worksheet_range(workbook, ANNUAL_LEAVE_SHEET)?;
     validate_headers(ANNUAL_LEAVE_SHEET, &range)?;
     Ok(range
         .rows()
@@ -212,14 +220,18 @@ fn parse_employment_records<RS>(
 where
     RS: std::io::Read + std::io::Seek,
 {
-    let available: HashSet<String> = workbook.sheet_names().iter().cloned().collect();
+    let available: HashSet<String> = workbook
+        .sheet_names()
+        .iter()
+        .map(|name| name.trim().to_owned())
+        .collect();
     let mut records = std::collections::BTreeMap::<String, EmploymentRecord>::new();
 
     for (sheet_name, is_hire) in [("入职名单", true), ("离职名单", false)] {
         if !available.contains(sheet_name) {
             continue;
         }
-        let range = workbook.worksheet_range(sheet_name)?;
+        let range = worksheet_range(workbook, sheet_name)?;
         validate_headers(sheet_name, &range)?;
         for (index, row) in range.rows().skip(1).enumerate() {
             let name = cell_text(row.first());
@@ -265,9 +277,7 @@ pub fn load_company_history(
     path: impl AsRef<Path>,
 ) -> Result<HashMap<String, String>, DingtalkError> {
     let mut workbook = open_workbook_auto(path)?;
-    let range = workbook
-        .worksheet_range("考勤明细")
-        .map_err(|_| DingtalkError::MissingSheet("考勤明细".to_owned()))?;
+    let range = worksheet_range(&mut workbook, "考勤明细")?;
     let mut companies = HashMap::new();
     for row in range.rows().skip(4) {
         let name = cell_text(row.get(2));
@@ -408,11 +418,35 @@ fn valid_period(year: u16, month: u8) -> Option<(u16, u8)> {
         .and_then(|_| (1..=12).contains(&month).then_some((year, month)))
 }
 
+fn worksheet_range<RS>(
+    workbook: &mut calamine::Sheets<RS>,
+    name: &str,
+) -> Result<calamine::Range<Data>, DingtalkError>
+where
+    RS: std::io::Read + std::io::Seek,
+{
+    let names = workbook.sheet_names();
+    let mut matches = names
+        .iter()
+        .filter(|candidate| candidate.trim() == name.trim());
+    let actual = matches
+        .next()
+        .ok_or_else(|| DingtalkError::MissingSheet(name.trim().to_owned()))?;
+    if matches.next().is_some() {
+        return Err(DingtalkError::AmbiguousSheet(name.trim().to_owned()));
+    }
+    Ok(workbook.worksheet_range(actual)?)
+}
+
 fn validate_required_sheets<RS>(workbook: &calamine::Sheets<RS>) -> Result<(), DingtalkError>
 where
     RS: std::io::Read + std::io::Seek,
 {
-    let available: BTreeSet<String> = workbook.sheet_names().iter().cloned().collect();
+    let available: BTreeSet<String> = workbook
+        .sheet_names()
+        .iter()
+        .map(|name| name.trim().to_owned())
+        .collect();
     for required in REQUIRED_SHEETS {
         if !available.contains(required) {
             return Err(DingtalkError::MissingSheet(required.to_owned()));
@@ -640,6 +674,96 @@ mod tests {
     }
 
     #[test]
+    fn all_input_sheet_names_allow_surrounding_whitespace() {
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../examples/input/钉钉考勤报表示例_202607.xlsx");
+        let mut source = open_workbook_auto(fixture).unwrap();
+        let mut results = Vec::new();
+        for padded in [false, true] {
+            let path = std::env::temp_dir().join(format!(
+                "flt-attendance-sheet-trim-{}-{padded}.xlsx",
+                std::process::id()
+            ));
+            let mut output = Workbook::new();
+            for name in REQUIRED_SHEETS.into_iter().chain(EMPLOYMENT_SHEETS) {
+                let range = source.worksheet_range(name).unwrap();
+                let sheet = output.add_worksheet();
+                sheet
+                    .set_name(if padded {
+                        format!("  {name}　")
+                    } else {
+                        name.to_owned()
+                    })
+                    .unwrap();
+                for (row_index, row) in range.rows().take(5).enumerate() {
+                    for (column, cell) in row.iter().enumerate() {
+                        if !matches!(cell, Data::Empty) {
+                            let value = if EMPLOYMENT_SHEETS.contains(&name)
+                                && row_index > 0
+                                && column == 3
+                            {
+                                let date = cell_date(Some(cell)).unwrap();
+                                format!("{}-{:02}-{:02}", date.year, date.month, date.day)
+                            } else {
+                                cell.to_string()
+                            };
+                            sheet
+                                .write_string(row_index as u32, column as u16, value)
+                                .unwrap();
+                        }
+                    }
+                }
+            }
+            let history = output.add_worksheet();
+            history
+                .set_name(if padded {
+                    " 考勤明细 "
+                } else {
+                    "考勤明细"
+                })
+                .unwrap();
+            history.write_string(0, 0, "历史公司").unwrap();
+            history.write_string(4, 1, "测试公司").unwrap();
+            history.write_string(4, 2, "测试员工").unwrap();
+            output.save(&path).unwrap();
+            let summary = inspect_dingtalk(&path).unwrap();
+            assert!(summary.sheet(" 入职名单 ").is_some());
+            let dataset = load_dingtalk(&path).unwrap();
+            assert!(!dataset.employment_records.is_empty());
+            let history = load_company_history(&path).unwrap();
+            assert_eq!(
+                history.get("测试员工").map(String::as_str),
+                Some("测试公司")
+            );
+            results.push((summary, dataset, history));
+            std::fs::remove_file(path).unwrap();
+        }
+        assert_eq!(results[0], results[1]);
+    }
+
+    #[test]
+    fn trimmed_sheet_lookup_rejects_missing_and_ambiguous_names() {
+        let path = std::env::temp_dir().join(format!(
+            "flt-attendance-sheet-collision-{}.xlsx",
+            std::process::id()
+        ));
+        let mut output = Workbook::new();
+        output.add_worksheet().set_name("每日统计").unwrap();
+        output.add_worksheet().set_name(" 每日统计 ").unwrap();
+        output.save(&path).unwrap();
+        let mut workbook = open_workbook_auto(&path).unwrap();
+        assert!(matches!(
+            worksheet_range(&mut workbook, "每日统计"),
+            Err(DingtalkError::AmbiguousSheet(_))
+        ));
+        assert!(matches!(
+            worksheet_range(&mut workbook, "月度汇总"),
+            Err(DingtalkError::MissingSheet(_))
+        ));
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
     fn reads_period_from_common_date_text() {
         assert_eq!(period_from_text("2026-07-01"), Some((2026, 7)));
         assert_eq!(period_from_text("2026/7/31 00:00:00"), Some((2026, 7)));
@@ -681,7 +805,7 @@ mod tests {
             std::process::id()
         ));
 
-        write_annual_leave_workbook(&detail_path, "年假明细");
+        write_annual_leave_workbook(&detail_path, " 年假明细　");
         let mut detail_workbook = open_workbook_auto(&detail_path).unwrap();
         let records = parse_annual_leave_records(&mut detail_workbook).unwrap();
         assert_eq!(records.len(), 1);

@@ -80,7 +80,32 @@ fn parses_and_reconciles_real_dingtalk_export() {
         .sum();
 
     assert_eq!(report.summary_rows.len(), 236);
-    assert_eq!(report.exception_rows.len(), 52);
+    assert_eq!(report.exception_rows.len(), 49);
+    for (employee_no, day) in [
+        ("24149", 17),
+        ("23040", 9),
+        ("23040", 10),
+        ("23040", 30),
+        ("23109", 2),
+        ("25222", 14),
+        ("25187", 28),
+        ("25187", 29),
+    ] {
+        let detail = report
+            .detail_rows
+            .iter()
+            .find(|row| row.employee_no == employee_no)
+            .unwrap();
+        assert!(!detail.days[day - 1].attendance.contains("缺卡"));
+        if let Some(exception) = report
+            .exception_rows
+            .iter()
+            .find(|row| row.employee_no == employee_no)
+        {
+            assert!(!exception.notes.contains(&format!("7.{day}上班未签到")));
+            assert!(!exception.notes.contains(&format!("7.{day}下班未签退")));
+        }
+    }
     let zhang_liwen_exception = report
         .exception_rows
         .iter()
