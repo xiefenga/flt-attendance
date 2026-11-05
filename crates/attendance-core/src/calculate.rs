@@ -864,7 +864,7 @@ fn calculate_meal_allowance(
                 && monthly
                     .daily_results
                     .get(index)
-                    .is_none_or(|result| !result.contains("出差"))
+                    .is_none_or(|result| !result.contains("出差") && !result.contains("居家办公"))
             {
                 meal.0 = 1.0;
             }
@@ -898,7 +898,10 @@ fn calculate_meal_allowance(
             .get(day - 1)
             .map(String::as_str)
             .unwrap_or("");
-        if !is_active_day(employment, year, month, day) || result.contains("出差") {
+        if !is_active_day(employment, year, month, day)
+            || result.contains("出差")
+            || result.contains("居家办公")
+        {
             continue;
         }
         let is_workday = holiday::is_workday(year, month, day as u8);
@@ -3474,7 +3477,7 @@ mod tests {
     }
 
     #[test]
-    fn travel_days_never_receive_meals_even_with_overtime() {
+    fn travel_and_home_office_days_never_receive_meals_even_with_overtime() {
         for (month, day, is_workday) in [(7, 1, true), (7, 4, false), (10, 1, false)] {
             let mut monthly = empty_monthly_record();
             monthly.daily_results = vec![String::new(); days_in_month(2026, month)];
@@ -3485,13 +3488,21 @@ mod tests {
                 MealPolicy::PunchOnly,
                 MealPolicy::ScheduledWithoutPunch,
             ] {
-                for result in ["正常", "出差1天", "出差0.5天,加班16小时"] {
+                for result in [
+                    "正常",
+                    "出差1天",
+                    "出差0.5天,加班16小时",
+                    "居家办公",
+                    "居家办公,加班16小时",
+                ] {
                     monthly.daily_results[day - 1] = result.to_owned();
                     let expected = if policy == MealPolicy::ScheduledWithoutPunch {
                         let workdays = calendar_workdays_in_employment(2026, month, None);
-                        let excluded = usize::from(is_workday && result.contains("出差"));
+                        let excluded = usize::from(
+                            is_workday && (result.contains("出差") || result.contains("居家办公")),
+                        );
                         ((workdays - excluded) as f64, 0.0)
-                    } else if result.contains("出差") {
+                    } else if result.contains("出差") || result.contains("居家办公") {
                         (0.0, 0.0)
                     } else if is_workday {
                         (1.0, 2.0)
@@ -3514,6 +3525,47 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn home_office_on_hire_day_excludes_all_meals_but_keeps_overtime() {
+        let mut monthly = empty_monthly_record();
+        monthly.weekday_overtime_hours = 3.0;
+        monthly.daily_results = vec!["居家办公,加班07-01 18:00到07-01 21:00 3小时".to_owned()];
+        let report = calculate_attendance(&AttendanceDataset {
+            period: crate::model::AttendancePeriod {
+                year: 2026,
+                month: 7,
+            },
+            monthly: vec![monthly],
+            daily: vec![overtime_daily_with_punches(
+                "26-07-01", "08:30", "21:00", 3.0,
+            )],
+            invalid_punches: vec![],
+            annual_leave_records: vec![],
+            employment_records: vec![EmploymentRecord {
+                employee_no: "10001".to_owned(),
+                name: "测试员工".to_owned(),
+                company: String::new(),
+                hire_date: Some(CalendarDate {
+                    year: 2026,
+                    month: 7,
+                    day: 1,
+                }),
+                termination_date: None,
+            }],
+        });
+        let day = &report.detail_rows[0].days[0];
+        assert_eq!(
+            (day.attendance_meal_count, day.overtime_meal_count),
+            (0.0, 0.0)
+        );
+        assert_eq!(day.overtime_hours, 3.0);
+        let summary = &report.summary_rows[0];
+        assert_eq!(summary.attendance_meal_count, 0.0);
+        assert_eq!(summary.overtime_meal_count, 0.0);
+        assert_eq!(summary.meal_allowance_count, Some(0.0));
+        assert_eq!(summary.weekday_overtime_hours, 3.0);
     }
 
     #[test]
