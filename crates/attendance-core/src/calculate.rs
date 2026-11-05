@@ -118,7 +118,7 @@ fn cap_overtime_by_effective_time(
                     .min(offset + 13 * 60)
                     .saturating_sub(lower.max(offset + 12 * 60)),
             );
-            if start <= offset + 17 * 60 + 30 && last_out >= offset + 19 * 60 + 30 {
+            if start <= offset + 17 * 60 + 30 && upper >= offset + 19 * 60 + 30 {
                 effective = effective.saturating_sub(
                     upper
                         .min(offset + 18 * 60)
@@ -2674,7 +2674,10 @@ mod tests {
             ("17:30", "19:30", "08:30", "19:30", 1.0, 1.0, 1),
             ("17:30", "19:30", "08:30", "19:30", 0.0, 0.0, 0),
             ("17:30", "19:30", "08:30", "19:29", 2.0, 1.5, 0),
-            ("17:30", "19:00", "08:30", "20:00", 2.0, 1.0, 0),
+            ("17:30", "19:00", "08:30", "20:00", 2.0, 1.5, 0),
+            ("17:30", "19:00", "08:13", "19:40", 1.5, 1.5, 0),
+            ("17:30", "18:30", "08:25", "21:30", 1.0, 1.0, 0),
+            ("17:30", "19:29", "08:30", "21:00", 2.0, 1.5, 0),
             ("18:00", "19:30", "08:30", "19:44", 1.5, 1.5, 1),
             ("17:30", "19:30", "18:00", "19:30", 1.5, 1.5, 1),
             ("17:30", "24:00", "08:30", "次日 00:00", 6.0, 6.0, 2),
@@ -2708,6 +2711,59 @@ mod tests {
     }
 
     #[test]
+    fn dinner_requires_both_approval_and_punch_to_reach_1930() {
+        let daily = overtime_daily_with_punches("26-07-01", "08:30", "次日 21:30", 48.0);
+        for offset in [0, 1440] {
+            for (end, expected) in [
+                (18 * 60 + 30, 1.0),
+                (19 * 60, 1.5),
+                (19 * 60 + 29, 119.0 / 60.0),
+                (19 * 60 + 30, 1.5),
+            ] {
+                assert_eq!(
+                    cap_overtime_by_effective_time(
+                        48.0,
+                        &daily,
+                        Some(&[(offset + 17 * 60 + 30, offset + end)])
+                    ),
+                    expected
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn short_evening_approvals_keep_hours_in_daily_and_monthly_reports() {
+        let mut monthly = empty_monthly_record();
+        monthly.weekday_overtime_hours = 2.5;
+        monthly.daily_results = vec![String::new(); 31];
+        monthly.daily_results[9] = "正常,加班10-10 17:30到10-10 18:30 1小时".to_owned();
+        monthly.daily_results[20] = "正常,加班10-21 17:30到10-21 19:00 1.5小时".to_owned();
+        let report = calculate_attendance(&AttendanceDataset {
+            period: crate::model::AttendancePeriod {
+                year: 2026,
+                month: 10,
+            },
+            monthly: vec![monthly],
+            daily: vec![
+                overtime_daily_with_punches("26-10-10", "08:25", "21:30", 1.0),
+                overtime_daily_with_punches("26-10-21", "08:13", "19:40", 1.5),
+            ],
+            invalid_punches: vec![],
+            employment_records: vec![],
+            annual_leave_records: vec![],
+        });
+        let detail = &report.detail_rows[0];
+        assert_eq!(detail.days[9].overtime_hours, 1.0);
+        assert_eq!(detail.days[20].overtime_hours, 1.5);
+        assert_eq!(detail.days[9].overtime_meal_count, 0.0);
+        assert_eq!(detail.days[20].overtime_meal_count, 0.0);
+        assert_eq!(detail.summary.weekday_overtime_hours, 2.5);
+        assert_eq!(detail.summary.actual_attendance_hours, Some(18.5));
+        assert_eq!(detail.summary.overtime_meal_count, 0.0);
+    }
+
+    #[test]
     fn overtime_ranges_preserve_gaps_merge_overlap_and_handle_midnight() {
         let result = "加班07-31 17:30到07-31 19:00 1小时,加班07-31 18:00到07-31 19:00 1小时,加班07-31 20:00到08-01 00:00 4小时";
         let applications = overtime_application_ranges(result, 2026, 7, 31);
@@ -2715,7 +2771,7 @@ mod tests {
         let daily = overtime_daily_with_punches("26-07-31", "08:30", "次日 00:00", 6.0);
         assert_eq!(
             cap_overtime_by_effective_time(6.0, &daily, applications.as_deref()),
-            5.0
+            5.5
         );
         assert_eq!(
             workday_overtime_meals(
