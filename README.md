@@ -50,11 +50,11 @@ npm run make
 
 ## 示例与规则资料
 
-- `examples/input/`：钉钉完整考勤报表示例。
+- `examples/input/`：完全合成的钉钉结构考勤样例，包含 12 名虚构员工和 2026 年 7 月的关联记录，场景见 [合成样例说明](examples/input/README.md)。
 - `examples/templates/`：当前输出模板和旧版模板。
 - `docs/references/`：原始规则 Excel 和补充 DOCX。
 
-示例考勤报表含真实历史人员及考勤信息。仓库公开前必须先替换为脱敏数据。
+`examples/input/` 已替换为从零构造的合成数据，不复用真实员工的姓名、工号、UserId、打卡或请假记录。本次替换不处理 Git 历史；模板、配置及规则资料仍需单独审查，不能据此认定整个仓库已完成脱敏。
 
 ## Rust 命令行验证
 
@@ -63,3 +63,4 @@ cargo run -p attendance-cli -- inspect <钉钉导出.xlsx>
 cargo run -p attendance-cli -- generate <输出.xlsx> 2026 7
 cargo run -p attendance-cli -- calculate <钉钉导出.xlsx> <输出.xlsx>
 ```
+
